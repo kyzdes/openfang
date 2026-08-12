@@ -473,8 +473,25 @@ impl ModelCatalog {
     pub fn remove_custom_model(&mut self, model_id: &str) -> bool {
         let lower = model_id.to_lowercase();
         let before = self.models.len();
+        // Providers that lose a model here need their `model_count` recomputed,
+        // mirroring `add_custom_model`.
+        let affected: Vec<String> = self
+            .models
+            .iter()
+            .filter(|m| m.id.to_lowercase() == lower && m.tier == ModelTier::Custom)
+            .map(|m| m.provider.clone())
+            .collect();
         self.models
             .retain(|m| !(m.id.to_lowercase() == lower && m.tier == ModelTier::Custom));
+        for provider in affected {
+            if let Some(p) = self.providers.iter_mut().find(|p| p.id == provider) {
+                p.model_count = self
+                    .models
+                    .iter()
+                    .filter(|m| m.provider == provider)
+                    .count();
+            }
+        }
         self.models.len() < before
     }
 
@@ -4862,5 +4879,92 @@ mod tests {
         } else {
             std::env::remove_var("OLLAMA_HOST");
         }
+    }
+
+    // Regression coverage: `remove_custom_model` used to leave
+    // `ProviderInfo::model_count` untouched, so the number drifted upwards with
+    // every deletion until the daemon was restarted.
+    fn custom_entry(id: &str, provider: &str) -> ModelCatalogEntry {
+        ModelCatalogEntry {
+            id: id.to_string(),
+            display_name: id.to_string(),
+            provider: provider.to_string(),
+            tier: ModelTier::Custom,
+            ..Default::default()
+        }
+    }
+
+    fn actual_count(catalog: &ModelCatalog, provider: &str) -> usize {
+        catalog
+            .list_models()
+            .iter()
+            .filter(|m| m.provider == provider)
+            .count()
+    }
+
+    fn stored_count(catalog: &ModelCatalog, provider: &str) -> usize {
+        catalog.get_provider(provider).unwrap().model_count
+    }
+
+    #[test]
+    fn test_custom_model_count_stays_consistent() {
+        let mut catalog = ModelCatalog::new();
+        let baseline = stored_count(&catalog, "anthropic");
+        assert_eq!(baseline, actual_count(&catalog, "anthropic"));
+        let other_baseline = stored_count(&catalog, "openai");
+
+        // Add one.
+        assert!(catalog.add_custom_model(custom_entry("cm-1", "anthropic")));
+        assert_eq!(stored_count(&catalog, "anthropic"), baseline + 1);
+        assert_eq!(
+            stored_count(&catalog, "anthropic"),
+            actual_count(&catalog, "anthropic")
+        );
+
+        // Add several more.
+        for id in ["cm-2", "cm-3", "cm-4"] {
+            assert!(catalog.add_custom_model(custom_entry(id, "anthropic")));
+        }
+        // A model on a different provider must not be disturbed by any of this.
+        assert!(catalog.add_custom_model(custom_entry("cm-other", "openai")));
+        assert_eq!(stored_count(&catalog, "anthropic"), baseline + 4);
+        assert_eq!(stored_count(&catalog, "openai"), other_baseline + 1);
+
+        // Remove one.
+        assert!(catalog.remove_custom_model("cm-1"));
+        assert_eq!(stored_count(&catalog, "anthropic"), baseline + 3);
+        assert_eq!(
+            stored_count(&catalog, "anthropic"),
+            actual_count(&catalog, "anthropic")
+        );
+
+        // Remove several in a row without any intervening add — this is where the
+        // stale count used to accumulate instead of being capped at one.
+        assert!(catalog.remove_custom_model("cm-2"));
+        assert!(catalog.remove_custom_model("CM-3")); // case-insensitive
+        assert!(catalog.remove_custom_model("cm-4"));
+        assert_eq!(stored_count(&catalog, "anthropic"), baseline);
+        assert_eq!(
+            stored_count(&catalog, "anthropic"),
+            actual_count(&catalog, "anthropic")
+        );
+
+        // Removing something that is not there changes nothing.
+        assert!(!catalog.remove_custom_model("cm-1"));
+        assert!(!catalog.remove_custom_model("no-such-model"));
+        assert_eq!(stored_count(&catalog, "anthropic"), baseline);
+
+        // Builtin models are never removable, and the count reflects that.
+        assert!(!catalog.remove_custom_model("claude-sonnet-4-20250514"));
+        assert_eq!(stored_count(&catalog, "anthropic"), baseline);
+
+        // The other provider is still intact.
+        assert_eq!(stored_count(&catalog, "openai"), other_baseline + 1);
+        assert_eq!(
+            stored_count(&catalog, "openai"),
+            actual_count(&catalog, "openai")
+        );
+        assert!(catalog.remove_custom_model("cm-other"));
+        assert_eq!(stored_count(&catalog, "openai"), other_baseline);
     }
 }

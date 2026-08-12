@@ -746,7 +746,8 @@ fn cap_file_blocks(s: &str, max_chars: usize) -> String {
             let note = format!("<omitted blocks=\"{dropped}\" reason=\"context budget\"/>");
             let extra = if kept.is_empty() { 0 } else { 1 };
             if used + extra + note.chars().count() <= max_chars {
-                used += extra + note.chars().count();
+                // `used` is deliberately not updated: nothing reads it after this break,
+                // and clippy's unused-assignments is right to say so.
                 kept.push(note);
                 break;
             }

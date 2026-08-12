@@ -213,7 +213,7 @@ pub fn build_system_prompt(ctx: &PromptContext) -> String {
     if !ctx.is_subagent {
         if let Some(ref ws_ctx) = ctx.workspace_context {
             if !ws_ctx.trim().is_empty() {
-                sections.push(data_section("workspace_context", &cap_str(ws_ctx, 1000)));
+                sections.push(data_section("workspace_context", &cap_file_blocks(ws_ctx, 1000)));
             }
         }
     }
@@ -680,6 +680,94 @@ fn strip_code_blocks(content: &str) -> String {
     result.trim().to_string()
 }
 
+/// Cap the workspace-context body without ever cutting a `<file>` block open.
+///
+/// `cap_str` protects the outer `<workspace_context>` tag only, because the wrapper is
+/// applied after it. The body itself is a list of `<file name="…">…</file>` blocks, and a
+/// character cap lands inside one of them: measured on this box, 11 of 14 agents were
+/// getting five opening tags and four closing ones. A dangling open tag is worse than the
+/// `## ` heading this patch replaced — it invites the model to treat everything after it,
+/// including its own answer, as file content.
+///
+/// So blocks are added whole and dropped whole. What is left out is stated rather than
+/// silently missing, because an agent that cannot see a file at all should not conclude
+/// the file is empty.
+fn cap_file_blocks(s: &str, max_chars: usize) -> String {
+    if s.chars().count() <= max_chars {
+        return s.to_string();
+    }
+
+    // Group lines into units: a `<file …>` line opens a unit that runs to its `</file>`.
+    let mut units: Vec<String> = Vec::new();
+    let mut open: Option<String> = None;
+    for line in s.lines() {
+        match open.as_mut() {
+            Some(buf) => {
+                buf.push('\n');
+                buf.push_str(line);
+                if line.trim() == "</file>" {
+                    units.push(open.take().unwrap());
+                }
+            }
+            None => {
+                if line.trim_start().starts_with("<file ") && line.trim() != "</file>" {
+                    open = Some(line.to_string());
+                } else {
+                    units.push(line.to_string());
+                }
+            }
+        }
+    }
+    // An unterminated block in the input is kept as-is: dropping it would hide data, and
+    // the malformed tag came from upstream, not from this cap.
+    if let Some(buf) = open.take() {
+        units.push(buf);
+    }
+
+    let mut kept: Vec<String> = Vec::new();
+    let mut dropped = 0usize;
+    let mut used = 0usize;
+    for unit in units {
+        let extra = if kept.is_empty() { 0 } else { 1 };
+        let len = unit.chars().count();
+        if used + extra + len > max_chars {
+            dropped += 1;
+            continue;
+        }
+        used += extra + len;
+        kept.push(unit);
+    }
+
+    // The omission note has to fit too, and it earns its place: an agent that cannot see a
+    // file at all must not conclude the file is empty. If the budget is tight, give up kept
+    // blocks for it rather than dropping the note — the note is what makes the gap legible.
+    if dropped > 0 {
+        loop {
+            let note = format!("<omitted blocks=\"{dropped}\" reason=\"context budget\"/>");
+            let extra = if kept.is_empty() { 0 } else { 1 };
+            if used + extra + note.chars().count() <= max_chars {
+                used += extra + note.chars().count();
+                kept.push(note);
+                break;
+            }
+            match kept.pop() {
+                Some(last) => {
+                    used -= last.chars().count() + if kept.is_empty() { 0 } else { 1 };
+                    dropped += 1;
+                }
+                // Nothing left to give up: the note alone exceeds the budget, so emit it
+                // truncated rather than returning a body that hides the omission.
+                None => {
+                    kept.push(cap_str(&note, max_chars));
+                    break;
+                }
+            }
+        }
+    }
+
+    kept.join("\n")
+}
+
 fn cap_str(s: &str, max_chars: usize) -> String {
     if s.chars().count() <= max_chars {
         s.to_string()
@@ -864,6 +952,42 @@ mod tests {
     /// Behavioral instruction prose deliberately keeps its markdown headings —
     /// heading structure carries directive weight. Changing that set should be
     /// a conscious act, so pin it.
+    #[test]
+    fn cap_file_blocks_never_splits_a_file_block() {
+        // Five blocks of ~120 chars each against a 300-char budget: a character cap lands
+        // inside block three and leaves its opening tag dangling. This is the shape that
+        // was reaching 11 of 14 agents on the box.
+        let body = (1..=5)
+            .map(|i| format!("<file name=\"F{i}.md\">\n{}\n</file>", "x".repeat(100)))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let naive = cap_str(&body, 300);
+        assert_ne!(
+            naive.matches("<file ").count(),
+            naive.matches("</file>").count(),
+            "precondition: the plain character cap is what leaves tags unbalanced"
+        );
+
+        let capped = cap_file_blocks(&body, 300);
+        assert_eq!(
+            capped.matches("<file ").count(),
+            capped.matches("</file>").count(),
+            "every kept block must be closed: {capped}"
+        );
+        assert!(capped.chars().count() <= 300, "budget respected");
+        assert!(
+            capped.contains("<omitted blocks="),
+            "what was dropped is stated, not silently missing: {capped}"
+        );
+        // A block that fits is kept verbatim, not trimmed.
+        assert!(capped.contains("<file name=\"F1.md\">"));
+
+        // Under budget the body is untouched.
+        let small = "- Project: openfang (Rust)\n<file name=\"A.md\">\nhi\n</file>";
+        assert_eq!(cap_file_blocks(small, 1000), small);
+    }
+
     #[test]
     fn test_only_instruction_prose_keeps_markdown_headings() {
         let prompt = build_system_prompt(&full_ctx());

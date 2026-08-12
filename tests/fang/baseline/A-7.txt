@@ -1,0 +1,255 @@
+==================================================================
+A-7 baseline — FallbackModel base_url resolution
+date         : 2026-08-12T12:38:32Z
+base url     : http://127.0.0.1:4201
+image ver    : 0.6.9
+container    : openfang-staging (openfang-openfang:latest)
+dead primary : http://127.0.0.1:9/v1
+
+--- relevant config.toml (the bug needs default_model.base_url set) ---
+[default_model]
+provider = "hyperfusion"
+model = "google/gemma-4-31b-it"
+api_key_env = "<REDACTED>"
+base_url = "https://api.hyperfusion.io/v1"
+
+[provider_urls]
+hyperfusion = "https://api.hyperfusion.io/v1"
+y7router = "https://router.y7.hk/v1"
+
+--- cleanup (idempotency) ---
+
+=== test-a7-inherit ===
+--- manifest ---
+name = "test-a7-inherit"
+version = "1.0.0"
+description = "A-7 baseline probe"
+author = "fang-tests"
+module = "builtin:chat"
+schedule = "reactive"
+priority = "Normal"
+tags = ["test-a7"]
+
+[model]
+provider = "hyperfusion"
+model = "google/gemma-4-31b-it"
+max_tokens = 256
+temperature = 0.0
+system_prompt = "You are a probe. Answer in one word."
+api_key_env = "<REDACTED>"
+base_url = "http://127.0.0.1:9/v1"
+
+[[fallback_models]]
+provider = "y7router"
+model = "kimi/k3"
+api_key_env = "<REDACTED>"
+# base_url deliberately absent -- this is the defect under test
+--- spawn: HTTP 201  agent_id=7f1c178a-4331-42b9-a85a-fe317da6c720 ---
+on-disk manifest: ABSENT (registry only)
+--- POST /api/agents/7f1c178a-4331-42b9-a85a-fe317da6c720/message (timeout 600s) ---
+HTTP 500   (1s elapsed)
+{"error":"Message delivery failed: LLM driver error: Auth error: {\"error\":{\"message\":\"Authentication Error, Invalid proxy server token passed. Received API Key = sk-...f0b4, Key Hash (Token) =2a7ef11703703565cea1ae527d51c0b7bcd99fa7aa7265f53a5a8198f23ad822. Unab..."}
+
+--- daemon log for this call (lines added during it) ---
+2026-08-12T12:38:33.635807Z  WARN openfang_runtime::drivers::fallback: Fallback driver failed, trying next driver_index=0 model= error=HTTP error: error sending request for url (http://127.0.0.1:9/v1/chat/completions)
+2026-08-12T12:38:34.884689Z  WARN openfang_runtime::drivers::fallback: Fallback driver failed, trying next driver_index=1 model=kimi/k3 error=API error (401): {"error":{"message":"Authentication Error, Invalid proxy server token passed. Received API Key = sk-...f0b4, Key Hash (Token) =2a7ef11703703565cea1ae527d51c0b7bcd99fa7aa7265f53a5a8198f23ad822. Unable to find token.`","type":"token_not_found_in_db","param":"key","code":"401"}}
+2026-08-12T12:38:34.884854Z  WARN openfang_runtime::agent_loop: LLM error classified: Auth error: {"error":{"message":"Authentication Error, Invalid proxy server token passed. Received API Key = sk-...f0b4, Key Hash (Token) =2a7ef11703703565cea1ae527d51c0b7bcd99fa7aa7265f53a5a8198f23ad822. Unab... category=Auth retryable=false raw=API error (401): {"error":{"message":"Authentication Error, Invalid proxy server token passed. Received API Key = sk-...f0b4, Key Hash (Token) =2a7ef11703703565cea1ae527d51c0b7bcd99fa7aa7265f53a5a8198f23ad822. Unable to find token.`","type":"token_not_found_in_db","param":"key","code":"401"}}
+2026-08-12T12:38:34.926873Z  WARN openfang_kernel::kernel: Agent loop failed — recorded in supervisor agent_id=7f1c178a-4331-42b9-a85a-fe317da6c720 error=LLM driver error: Auth error: {"error":{"message":"Authentication Error, Invalid proxy server token passed. Received API Key = sk-...f0b4, Key Hash (Token) =2a7ef11703703565cea1ae527d51c0b7bcd99fa7aa7265f53a5a8198f23ad822. Unab...
+2026-08-12T12:38:34.926909Z  WARN openfang_api::routes: send_message failed for agent 7f1c178a-4331-42b9-a85a-fe317da6c720: LLM driver error: Auth error: {"error":{"message":"Authentication Error, Invalid proxy server token passed. Received API Key = sk-...f0b4, Key Hash (Token) =2a7ef11703703565cea1ae527d51c0b7bcd99fa7aa7265f53a5a8198f23ad822. Unab...
+
+=== test-a7-explicit ===
+--- manifest ---
+name = "test-a7-explicit"
+version = "1.0.0"
+description = "A-7 baseline probe"
+author = "fang-tests"
+module = "builtin:chat"
+schedule = "reactive"
+priority = "Normal"
+tags = ["test-a7"]
+
+[model]
+provider = "hyperfusion"
+model = "google/gemma-4-31b-it"
+max_tokens = 256
+temperature = 0.0
+system_prompt = "You are a probe. Answer in one word."
+api_key_env = "<REDACTED>"
+base_url = "http://127.0.0.1:9/v1"
+
+[[fallback_models]]
+provider = "y7router"
+model = "kimi/k3"
+api_key_env = "<REDACTED>"
+base_url = "https://router.y7.hk/v1"
+--- spawn: HTTP 201  agent_id=c1f2c2e5-7b51-405c-9ada-41f65a27801d ---
+on-disk manifest: ABSENT (registry only)
+--- POST /api/agents/c1f2c2e5-7b51-405c-9ada-41f65a27801d/message (timeout 600s) ---
+HTTP 200   (7s elapsed)
+{"input_tokens":12754,"iterations":1,"output_tokens":17,"response":"PONG"}
+
+--- daemon log for this call (lines added during it) ---
+2026-08-12T12:38:35.226755Z  WARN openfang_runtime::drivers::fallback: Fallback driver failed, trying next driver_index=0 model= error=HTTP error: error sending request for url (http://127.0.0.1:9/v1/chat/completions)
+
+=== test-a7-control ===
+--- manifest ---
+name = "test-a7-control"
+version = "1.0.0"
+description = "A-7 baseline probe"
+author = "fang-tests"
+module = "builtin:chat"
+schedule = "reactive"
+priority = "Normal"
+tags = ["test-a7"]
+
+[model]
+provider = "y7router"
+model = "kimi/k3"
+max_tokens = 256
+temperature = 0.0
+system_prompt = "You are a probe. Answer in one word."
+api_key_env = "<REDACTED>"
+--- spawn: HTTP 201  agent_id=ac543422-acb0-496c-84cd-14893858583c ---
+on-disk manifest: ABSENT (registry only)
+--- POST /api/agents/ac543422-acb0-496c-84cd-14893858583c/message (timeout 600s) ---
+HTTP 200   (5s elapsed)
+{"input_tokens":12773,"iterations":1,"output_tokens":16,"response":"PONG"}
+
+--- daemon log for this call (lines added during it) ---
+
+=== test-a7-inherit-hf ===
+--- manifest ---
+name = "test-a7-inherit-hf"
+version = "1.0.0"
+description = "A-7 baseline probe"
+author = "fang-tests"
+module = "builtin:chat"
+schedule = "reactive"
+priority = "Normal"
+tags = ["test-a7"]
+
+[model]
+provider = "hyperfusion"
+model = "google/gemma-4-31b-it"
+max_tokens = 256
+temperature = 0.0
+system_prompt = "You are a probe. Answer in one word."
+api_key_env = "<REDACTED>"
+base_url = "http://127.0.0.1:9/v1"
+
+[[fallback_models]]
+provider = "hyperfusion"
+model = "google/gemma-4-31b-it"
+api_key_env = "<REDACTED>"
+# base_url absent, but this provider IS [default_model].provider
+--- spawn: HTTP 201  agent_id=d8d34893-3449-4c0b-9284-1cda5e265f9b ---
+on-disk manifest: ABSENT (registry only)
+--- POST /api/agents/d8d34893-3449-4c0b-9284-1cda5e265f9b/message (timeout 600s) ---
+HTTP 200   (2s elapsed)
+{"input_tokens":10965,"iterations":1,"output_tokens":3,"response":"PONG"}
+
+--- daemon log for this call (lines added during it) ---
+2026-08-12T12:38:48.181399Z  WARN openfang_runtime::drivers::fallback: Fallback driver failed, trying next driver_index=0 model= error=HTTP error: error sending request for url (http://127.0.0.1:9/v1/chat/completions)
+
+==================================================================
+RESULT TABLE
+AGENT                HTTP     VERDICT
+test-a7-inherit      500      no response field / 401 IN BODY
+test-a7-explicit     200      answered
+test-a7-control      200      answered
+test-a7-inherit-hf   200      answered
+
+METRIC: inherit=500  explicit=200
+        control=200  inherit-hf=200
+RED baseline means: inherit != 2xx (401 in body) AND explicit == 200
+                    AND control == 200 AND inherit-hf == 200
+
+--- cleanup ---
+  cleaned test-a7-inherit (7f1c178a-4331-42b9-a85a-fe317da6c720)
+  cleaned test-a7-explicit (c1f2c2e5-7b51-405c-9ada-41f65a27801d)
+  cleaned test-a7-control (ac543422-acb0-496c-84cd-14893858583c)
+  cleaned test-a7-inherit-hf (d8d34893-3449-4c0b-9284-1cda5e265f9b)
+done.
+
+==================================================================
+BASELINE SUMMARY (run 2 of 2; run 1 preserved in A-7-run1.txt, identical verdicts)
+==================================================================
+image version : 0.6.9  (container openfang-staging, image openfang-openfang:latest)
+date          : 2026-08-12T12:38Z  (run 1: 2026-08-12T12:37Z)
+
+METRIC BEFORE (the number to compare "after" against):
+    test-a7-inherit    HTTP 500, body carries provider 401   <-- RED
+    test-a7-explicit   HTTP 200, response "PONG"
+    test-a7-control    HTTP 200, response "PONG"
+    test-a7-inherit-hf HTTP 200, response "PONG"
+  i.e. 1 of 4 cases fails; the failing one is the only case where the fallback
+  provider differs from [default_model].provider and carries no explicit base_url.
+  Target after the patch: 4 of 4 return HTTP 200.
+
+DECISIVE LOG LINE (test-a7-inherit):
+  WARN openfang_runtime::drivers::fallback: Fallback driver failed, trying next
+       driver_index=1 model=kimi/k3
+       error=API error (401): {"error":{"message":"Authentication Error, Invalid
+       proxy server token passed. ... "type":"token_not_found_in_db" ...
+
+  The 401 body is LiteLLM's, i.e. api.hyperfusion.io answering. The fallback was
+  declared provider = "y7router", model = "kimi/k3", api_key_env = Y7ROUTER_API_KEY,
+  and [provider_urls] holds y7router = "https://router.y7.hk/v1". So the y7router
+  key was sent to the hyperfusion host: the fallback took [default_model].base_url.
+
+INDEPENDENT CONFIRMATION AT THE HTTP LAYER (no OpenFang involved):
+  curl -H "Authorization: Bearer $Y7ROUTER_API_KEY" \
+       -d '{"model":"ark/glm-4.7", ...}' https://api.hyperfusion.io/v1/chat/completions
+    -> HTTP 401 {"error":{"message":"Authentication Error, Invalid proxy server
+       token passed. Received API Key = sk-...f0b4", "type":"token_not_found_in_db"}}
+  Same key against its own host succeeds:
+  curl -H "Authorization: Bearer $Y7ROUTER_API_KEY" \
+       -d '{"model":"kimi/k3", ...}' https://router.y7.hk/v1/chat/completions
+    -> HTTP 200, content "PONG"
+
+ROOT CAUSE (crates/openfang-kernel/src/kernel.rs:5729-5733, resolve_driver):
+    base_url: fb
+        .base_url
+        .clone()
+        .or_else(|| dm.base_url.clone())            // <-- default_model wins
+        .or_else(|| self.lookup_provider_url(&fb_provider)),
+
+  [provider_urls] IS in the chain, but third. dm.base_url takes the slot first,
+  so the lookup is only ever reached when [default_model] has no base_url at all.
+
+  The primary model does the opposite and documents the intent
+  (kernel.rs:5619-5630): "Don't inherit default provider's base_url when
+  switching providers" -- it consults lookup_provider_url() directly whenever
+  agent_provider != default_provider.
+
+  The global [[fallback_providers]] chain also does it correctly
+  (kernel.rs:5771-5774): fb.base_url.or_else(|| lookup_provider_url(&fb.provider)).
+
+  So only the per-agent manifest fallback is wrong, and it is wrong in a
+  data-dependent way: harmless when the fallback provider happens to equal
+  [default_model].provider (proved by test-a7-inherit-hf passing), fatal when it
+  differs (test-a7-inherit).
+
+SECOND, SEPARATE SITE OF THE SAME DEFECT (not exercised by this script):
+  crates/openfang-runtime/src/agent_loop.rs:1269 (complete_with_retry) and
+  crates/openfang-runtime/src/agent_loop.rs:1449 (stream_with_retry), the
+  ModelNotFound fallback chain (#845), build their driver with
+        base_url: fb.base_url.clone(),
+  and nothing else -- no dm.base_url, no lookup_provider_url. A fallback without
+  an explicit base_url therefore reaches create_driver with base_url = None; for a
+  custom provider such as y7router that is not in provider_defaults(), that path
+  ends in drivers/mod.rs:568-583 with
+        "Provider 'y7router' has API key (Y7ROUTER_API_KEY is set) but no base_url
+         configured."
+  and the fallback is skipped entirely. This branch only runs when the primary
+  error classifies as ModelNotFound, which a dead base_url does not produce, so
+  this script cannot reach it. A patch that fixes only kernel.rs leaves it standing.
+  Those two sites also read the key with std::env::var directly, bypassing
+  resolve_credential (vault -> dotenv -> env), which is a further divergence.
+
+PATCH TARGET:
+  1. kernel.rs:5729-5733 -- drop the .or_else(|| dm.base_url.clone()) step, or
+     gate it on fb_provider == dm.provider, mirroring the primary at 5619-5630.
+  2. agent_loop.rs:1269 and :1449 -- these have no access to the kernel config;
+     either resolve the URL before the call and pass it in, or make FallbackModel
+     carry a resolved base_url populated once in the kernel.

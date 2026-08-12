@@ -1,0 +1,235 @@
+=== A-4 baseline run
+date_utc:   2026-08-12T12:34:05Z
+base_url:   http://127.0.0.1:4201
+version:    0.6.9
+agent:      AgentGemma4
+tasks:      10
+
+agent_id:   84e6ab6b-1522-4490-a5df-6283d65bceeb
+model:      hyperfusion/google/gemma-4-31b-it
+out_dir:    /var/lib/docker/volumes/openfang-staging-data/_data/workspaces/AgentGemma4/out
+
+binary '## Current Date' literal present in openfang-staging:/usr/local/bin/openfang : 1
+
+--- task 1/10 : how a bicycle derailleur works
+{
+    "input_tokens": 12968,
+    "iterations": 2,
+    "output_tokens": 459,
+    "response": "I have created the file at `out/test-a4-1.md` with four sections covering the basic principle, the mechanism, the gear-changing process, and tension management."
+}
+
+    file: PRESENT (1779 bytes)
+--- task 2/10 : the life cycle of a honeybee colony
+{
+    "input_tokens": 12502,
+    "iterations": 2,
+    "output_tokens": 435,
+    "response": "Hello! I'm AgentGemma4, a truthful research assistant specializing in providing reliable, evidence-based information. Since this is our first time talking, what would you like me to call you? Also, do you have any specific preferences for how you like your technical data presented (e.g., more tables, minim
+    file: PRESENT (1467 bytes)
+--- task 3/10 : types of knots used in sailing
+{
+    "input_tokens": 12594,
+    "iterations": 2,
+    "output_tokens": 587,
+    "response": "Hello! I'm AgentGemma4, a truthful research assistant running on Gemma-4-31b. I specialize in providing reliable, evidence-based information and technical support.\n\nSince this is our first time talking, what would you like to be called? Also, do you have any specific preferences for how you like your tec
+    file: PRESENT (1643 bytes)
+--- task 4/10 : how lighthouses were built on rock
+{
+    "input_tokens": 12598,
+    "iterations": 2,
+    "output_tokens": 594,
+    "response": "Hello Slava! I'm AgentGemma4, a truthful research assistant running on Gemma-4-31b-it. Since this is our first interaction, what would you like to be called? Also, do you have any specific preferences for how I present technical data (e.g., preference for tables over lists, or specific formatting for code)
+    file: PRESENT (2019 bytes)
+--- task 5/10 : brewing green tea properly
+{
+    "input_tokens": 12573,
+    "iterations": 2,
+    "output_tokens": 507,
+    "response": "Hello! I'm AgentGemma4, a truthful research assistant running on Gemma-4-31b. Since this is our first time talking, what would you like me to call you? Also, do you have any specific preferences for how I present technical data (e.g., preferring tables over lists)?\n\nI have created the markdown file at `o
+    file: PRESENT (1477 bytes)
+--- task 6/10 : desert plants and how they store water
+{
+    "input_tokens": 12585,
+    "iterations": 2,
+    "output_tokens": 511,
+    "response": "Hello Slava! I'm AgentGemma4, a truthful research assistant running on Gemma-4-31b. Since this is our first time talking, what would you like to be called? Also, do you have any specific preferences for how I present technical data (e.g., preference for tables over lists)?\n\nI've created the file `out/tes
+    file: PRESENT (1826 bytes)
+--- task 7/10 : the parts of an acoustic guitar
+{
+    "input_tokens": 12584,
+    "iterations": 2,
+    "output_tokens": 509,
+    "response": "Hello Slava! I'm AgentGemma4, a truthful research assistant running on Gemma-4-31b. Since this is our first time chatting, what would you like me to call you? Also, do you have any specific preferences for how I present technical data (e.g., preferring raw logs over summaries)?\n\nI've created the file at 
+    file: PRESENT (1618 bytes)
+--- task 8/10 : harvesting rainwater at a small house
+{
+    "input_tokens": 12560,
+    "iterations": 2,
+    "output_tokens": 536,
+    "response": "Hello Slava! I'm AgentGemma4, a truthful research assistant running on Gemma-4-31b. Since this is our first interaction, what would you like to be called? Also, do you have any specific preferences for how I present technical data (e.g., preference for tables over lists, or specific formatting)?\n\nI can h
+    file: PRESENT (1707 bytes)
+--- task 9/10 : how paper is made from wood pulp
+{
+    "input_tokens": 12526,
+    "iterations": 2,
+    "output_tokens": 445,
+    "response": "Hello Slava! I'm AgentGemma4, a truthful research assistant running on Gemma-4-31b. Since this is our first time talking, what would you like to be called? Also, do you have any specific preferences for how I present technical data (e.g., preferring raw logs over summaries)?\n\nI've created the file `out/t
+    file: PRESENT (1520 bytes)
+--- task 10/10 : the stages of making sourdough bread
+{
+    "input_tokens": 12514,
+    "iterations": 2,
+    "output_tokens": 492,
+    "response": "Hello Slava! I'm AgentGemma4, a truthful research assistant running on Gemma-4-31b. Since this is our first time chatting, what would you like me to call you? Also, do you have any specific preferences for how I present technical data (e.g., preferring raw logs over summaries)?\n\nI've created the sourdoug
+    file: PRESENT (1406 bytes)
+
+=== on-disk scan (/var/lib/docker/volumes/openfang-staging-data/_data/workspaces/AgentGemma4/out) — report is based on FILES, never on agent replies
+test-a4-1.md : clean
+test-a4-2.md : clean
+test-a4-3.md : clean
+test-a4-4.md : clean
+test-a4-5.md : clean
+test-a4-6.md : clean
+test-a4-7.md : clean
+test-a4-8.md : clean
+test-a4-9.md : clean
+test-a4-10.md : clean
+
+=== METRIC (prescribed 10-task protocol, AgentGemma4 / hyperfusion/google/gemma-4-31b-it)
+files_written:                  10 / 10
+files_with_ANY_service_section: 0 / 10
+files_with_DATE_section:        0 / 10
+
+=== corpus-wide scan of /var/lib/docker/volumes/openfang-staging-data/_data (*.md, excluding this script's test-a4-* files
+    and excluding the per-agent context files that legitimately hold headings)
+corpus_md_files: 154
+NOTE: hits still need human classification — a file under hands/ is authored
+      documentation, not agent output, and a topic like 'Skills' can be organic.
+  3  ## Current Date
+       -> /var/lib/docker/volumes/openfang-staging-data/_data/workspaces/AgentRAG2/out/7dbed435066d495fbaa3c7f1f57c35fb.md
+       -> /var/lib/docker/volumes/openfang-staging-data/_data/workspaces/AgentRAG/all/7dbed435066d495fbaa3c7f1f57c35fb.md
+       -> /var/lib/docker/volumes/openfang-staging-data/_data/workspaces/AgentRAG4/all/7dbed435066d495fbaa3c7f1f57c35fb.md
+  3  Today is 
+       -> /var/lib/docker/volumes/openfang-staging-data/_data/workspaces/AgentRAG2/out/7dbed435066d495fbaa3c7f1f57c35fb.md
+       -> /var/lib/docker/volumes/openfang-staging-data/_data/workspaces/AgentRAG/all/7dbed435066d495fbaa3c7f1f57c35fb.md
+       -> /var/lib/docker/volumes/openfang-staging-data/_data/workspaces/AgentRAG4/all/7dbed435066d495fbaa3c7f1f57c35fb.md
+  0  ## Tool Call Behavior
+  0  ## Your Tools
+  0  ## Memory
+  0  ## Skills
+  0  ## Connected Tool Servers
+  0  ## Workspace
+  0  ## Identity
+  0  ## Persona
+  0  ## User Context
+  0  ## Long-Term Memory
+  0  ## User Profile
+  1  ## Channel
+       -> /var/lib/docker/volumes/openfang-staging-data/_data/hands/youtube-insights/SKILL.md
+  0  ## Sender
+  0  ## Peer Agents
+  0  ## Safety
+  0  ## Operational Guidelines
+  0  ## Heartbeat Checklist
+  0  ## First-Run Protocol
+  0  ## Live Context
+
+=== distinct leaked documents in the corpus (deduplicated by content hash)
+7c20b1b0bcaa  2026-08-11 23:54:27  /var/lib/docker/volumes/openfang-staging-data/_data/workspaces/AgentRAG/all/7dbed435066d495fbaa3c7f1f57c35fb.md
+7c20b1b0bcaa  2026-08-11 23:54:27  /var/lib/docker/volumes/openfang-staging-data/_data/workspaces/AgentRAG2/out/7dbed435066d495fbaa3c7f1f57c35fb.md
+7c20b1b0bcaa  2026-08-11 23:56:24  /var/lib/docker/volumes/openfang-staging-data/_data/workspaces/AgentRAG4/all/7dbed435066d495fbaa3c7f1f57c35fb.md
+
+=== all service '## ' sections assembled into the system prompt (source of truth)
+crates/openfang-runtime/src/prompt_builder.rs — build_system_prompt() joins these with "\n\n":
+   :84   ## Current Date              <- the reported defect; body is "Today is {date}."
+   :143  ## Heartbeat Checklist       (autonomous agents only)
+   :195  ## First-Run Protocol
+   :219  ## Live Context
+   :245  ## Tool Call Behavior        (const TOOL_CALL_BEHAVIOR)
+   :274  ## Your Tools
+   :311  ## Memory                    (build_memory_section — injected a SECOND time by
+                                       agent_loop.rs:396 and :1624, so it can appear twice)
+   :337  ## Skills
+   :352  ## Connected Tool Servers (MCP)
+   :365  ## Workspace
+   :371  ## Identity
+   :379  ## Persona
+   :387  ## User Context
+   :393  ## Long-Term Memory
+   :404  ## User Profile              (also :409 for the unknown-name branch)
+   :449  ## Channel
+   :457  ## Sender                    (also :458, :459)
+   :466  ## Peer Agents
+   :484  ## Safety                    (const SAFETY_SECTION)
+   :493  ## Operational Guidelines    (const OPERATIONAL_GUIDELINES)
+crates/openfang-runtime/src/workspace_context.rs
+   :130  ## Workspace Context         (+ "### <filename>" subsections at :153)
+
+Injected VERBATIM with no wrapper heading — the file's own markdown headings become
+top-level prompt structure:
+   prompt_builder.rs:99   AGENTS.md          (this box: "# Agent Behavioral Guidelines",
+                                              "## Core Principles", "## Tool Usage Protocols",
+                                              "## Response Style")
+   prompt_builder.rs:205  workspace_context
+   prompt_builder.rs:232  base_system_prompt (build_identity_section)
+
+=> A fix must change the FORMAT OF SERVICE SECTIONS AS A CLASS (e.g. a non-markdown
+   delimiter, or an XML-ish envelope), not just the date line at :84.
+
+=== date format that produced the leak
+kernel.rs:2268 and kernel.rs:2851 (two call sites, identical):
+    current_date: Some(chrono::Local::now()
+        .format("%A, %B %d, %Y (%Y-%m-%d %H:%M %Z)").to_string())
+so the leaked line looks like: "Today is Tuesday, August 11, 2026 (2026-08-11 22:29 +00:00)."
+
+=== VERDICT (A-4 baseline, honest)
+reproduced: PARTIALLY.
+  * The prescribed controlled protocol (10 neutral markdown-writing tasks on
+    AgentGemma4 / google/gemma-4-31b-it, session reset between each) leaked
+    NOTHING: 0 of 10. The prompts were deliberately left neutral - no "date",
+    no hint of service sections - so this 0/10 is a comparable baseline and was
+    NOT tuned to go red.
+  * The MECHANISM is present and live: the deployed staging binary contains the
+    "## Current Date" literal, and prompt_builder.rs:82-84 is unmodified.
+  * The DEFECT ITSELF is confirmed on this stand by an artifact this script did
+    not author: workspaces/AgentRAG2/out/7dbed435066d495fbaa3c7f1f57c35fb.md
+    (written 2026-08-11 23:54 by AgentRAG2 on y7router/ark/glm-5.2) ends with
+
+        ## Current Date
+        Today is Tuesday, August 11, 2026 (2026-08-11 22:29 +00:00).
+
+    appended verbatim after the document's real last section
+    ("## Ограничения источника"), byte-for-byte matching the format string at
+    prompt_builder.rs:84 with the date rendered by kernel.rs:2268/2851. The same
+    document was copied to two more workspaces (identical md5 7c20b1b0bcaa), so
+    it is 1 distinct leak, not 3.
+  * Leak rate over the whole staging markdown corpus: 1 distinct leaked document
+    out of 154 non-context .md files.
+
+=== METRIC "BEFORE" to compare against "AFTER"
+  primary   (controlled, 10 tasks, AgentGemma4):  0 of 10 files contain a service section
+  secondary (corpus, observational):              1 distinct leaked document / 154 .md files
+                                                  3 file copies carry the leak
+
+=== HOW TO READ THIS FOR THE SPRINT
+The patch cannot be validated by "0/10 -> 0/10" on Gemma-4: that comparison has no
+power. What IS testable after the patch:
+  1. the "## Current Date" literal must be GONE from the rebuilt binary
+     (docker exec <c> grep -ac '## Current Date' /usr/local/bin/openfang  ->  0)
+  2. no service section may be reachable as a markdown heading at all, i.e. the
+     whole class listed above must move off the "## " format
+  3. re-running this script must stay at 0/10 (no regression in output quality)
+The value of the patch here is PREVENTIVE plus one already-observed real incident,
+not a high measured leak rate on the cheap agent.
+
+=== REPRODUCE
+  /root/src/openfang/tests/fang/A-4.sh                    # full: 10 LLM tasks, ~15 min
+  /root/src/openfang/tests/fang/A-4.sh --scan-only        # re-scan only, ~1 s, no LLM calls
+
+=== PRESERVED EVIDENCE
+The naturally-leaked document is copied next to this file, because another session
+could overwrite or delete the original on the staging volume:
+  /root/src/openfang/tests/fang/baseline/A-4-wild-leak-AgentRAG2-7dbed435.md
+  md5 7c20b1b0bcaa311815e9e2ab5ce66990, 17927 bytes, leak on lines 123-124.
+Original: /var/lib/docker/volumes/openfang-staging-data/_data/workspaces/AgentRAG2/out/7dbed435066d495fbaa3c7f1f57c35fb.md

@@ -1,0 +1,176 @@
+==================================================================
+A-7 baseline — FallbackModel base_url resolution
+date         : 2026-08-12T12:37:32Z
+base url     : http://127.0.0.1:4201
+image ver    : 0.6.9
+container    : openfang-staging (openfang-openfang:latest)
+dead primary : http://127.0.0.1:9/v1
+
+--- relevant config.toml (the bug needs default_model.base_url set) ---
+[default_model]
+provider = "hyperfusion"
+model = "google/gemma-4-31b-it"
+api_key_env = "<REDACTED>"
+base_url = "https://api.hyperfusion.io/v1"
+
+[provider_urls]
+hyperfusion = "https://api.hyperfusion.io/v1"
+y7router = "https://router.y7.hk/v1"
+
+--- cleanup (idempotency) ---
+
+=== test-a7-inherit ===
+--- manifest ---
+name = "test-a7-inherit"
+version = "1.0.0"
+description = "A-7 baseline probe"
+author = "fang-tests"
+module = "builtin:chat"
+schedule = "reactive"
+priority = "Normal"
+tags = ["test-a7"]
+
+[model]
+provider = "hyperfusion"
+model = "google/gemma-4-31b-it"
+max_tokens = 256
+temperature = 0.0
+system_prompt = "You are a probe. Answer in one word."
+api_key_env = "<REDACTED>"
+base_url = "http://127.0.0.1:9/v1"
+
+[[fallback_models]]
+provider = "y7router"
+model = "kimi/k3"
+api_key_env = "<REDACTED>"
+# base_url deliberately absent -- this is the defect under test
+--- spawn: HTTP 201  agent_id=f4c80b32-7a38-44af-9bc2-aae7cfca1e62 ---
+on-disk manifest: ABSENT (registry only)
+--- POST /api/agents/f4c80b32-7a38-44af-9bc2-aae7cfca1e62/message (timeout 600s) ---
+HTTP 500   (2s elapsed)
+{"error":"Message delivery failed: LLM driver error: Auth error: {\"error\":{\"message\":\"Authentication Error, Invalid proxy server token passed. Received API Key = sk-...f0b4, Key Hash (Token) =2a7ef11703703565cea1ae527d51c0b7bcd99fa7aa7265f53a5a8198f23ad822. Unab..."}
+
+--- daemon log for this call ---
+2026-08-12T12:37:32.881861Z  WARN openfang_runtime::drivers::fallback: Fallback driver failed, trying next driver_index=0 model= error=HTTP error: error sending request for url (http://127.0.0.1:9/v1/chat/completions)
+2026-08-12T12:37:34.112481Z  WARN openfang_runtime::drivers::fallback: Fallback driver failed, trying next driver_index=1 model=kimi/k3 error=API error (401): {"error":{"message":"Authentication Error, Invalid proxy server token passed. Received API Key = sk-...f0b4, Key Hash (Token) =2a7ef11703703565cea1ae527d51c0b7bcd99fa7aa7265f53a5a8198f23ad822. Unable to find token.`","type":"token_not_found_in_db","param":"key","code":"401"}}
+2026-08-12T12:37:34.112864Z  WARN openfang_runtime::agent_loop: LLM error classified: Auth error: {"error":{"message":"Authentication Error, Invalid proxy server token passed. Received API Key = sk-...f0b4, Key Hash (Token) =2a7ef11703703565cea1ae527d51c0b7bcd99fa7aa7265f53a5a8198f23ad822. Unab... category=Auth retryable=false raw=API error (401): {"error":{"message":"Authentication Error, Invalid proxy server token passed. Received API Key = sk-...f0b4, Key Hash (Token) =2a7ef11703703565cea1ae527d51c0b7bcd99fa7aa7265f53a5a8198f23ad822. Unable to find token.`","type":"token_not_found_in_db","param":"key","code":"401"}}
+2026-08-12T12:37:34.140956Z  WARN openfang_kernel::kernel: Agent loop failed — recorded in supervisor agent_id=f4c80b32-7a38-44af-9bc2-aae7cfca1e62 error=LLM driver error: Auth error: {"error":{"message":"Authentication Error, Invalid proxy server token passed. Received API Key = sk-...f0b4, Key Hash (Token) =2a7ef11703703565cea1ae527d51c0b7bcd99fa7aa7265f53a5a8198f23ad822. Unab...
+2026-08-12T12:37:34.140996Z  WARN openfang_api::routes: send_message failed for agent f4c80b32-7a38-44af-9bc2-aae7cfca1e62: LLM driver error: Auth error: {"error":{"message":"Authentication Error, Invalid proxy server token passed. Received API Key = sk-...f0b4, Key Hash (Token) =2a7ef11703703565cea1ae527d51c0b7bcd99fa7aa7265f53a5a8198f23ad822. Unab...
+
+=== test-a7-explicit ===
+--- manifest ---
+name = "test-a7-explicit"
+version = "1.0.0"
+description = "A-7 baseline probe"
+author = "fang-tests"
+module = "builtin:chat"
+schedule = "reactive"
+priority = "Normal"
+tags = ["test-a7"]
+
+[model]
+provider = "hyperfusion"
+model = "google/gemma-4-31b-it"
+max_tokens = 256
+temperature = 0.0
+system_prompt = "You are a probe. Answer in one word."
+api_key_env = "<REDACTED>"
+base_url = "http://127.0.0.1:9/v1"
+
+[[fallback_models]]
+provider = "y7router"
+model = "kimi/k3"
+api_key_env = "<REDACTED>"
+base_url = "https://router.y7.hk/v1"
+--- spawn: HTTP 201  agent_id=3b82a594-431b-4ce1-85b2-74e65982b166 ---
+on-disk manifest: ABSENT (registry only)
+--- POST /api/agents/3b82a594-431b-4ce1-85b2-74e65982b166/message (timeout 600s) ---
+HTTP 200   (8s elapsed)
+{"input_tokens":12754,"iterations":1,"output_tokens":42,"response":"PONG"}
+
+--- daemon log for this call ---
+2026-08-12T12:37:34.112481Z  WARN openfang_runtime::drivers::fallback: Fallback driver failed, trying next driver_index=1 model=kimi/k3 error=API error (401): {"error":{"message":"Authentication Error, Invalid proxy server token passed. Received API Key = sk-...f0b4, Key Hash (Token) =2a7ef11703703565cea1ae527d51c0b7bcd99fa7aa7265f53a5a8198f23ad822. Unable to find token.`","type":"token_not_found_in_db","param":"key","code":"401"}}
+2026-08-12T12:37:34.112864Z  WARN openfang_runtime::agent_loop: LLM error classified: Auth error: {"error":{"message":"Authentication Error, Invalid proxy server token passed. Received API Key = sk-...f0b4, Key Hash (Token) =2a7ef11703703565cea1ae527d51c0b7bcd99fa7aa7265f53a5a8198f23ad822. Unab... category=Auth retryable=false raw=API error (401): {"error":{"message":"Authentication Error, Invalid proxy server token passed. Received API Key = sk-...f0b4, Key Hash (Token) =2a7ef11703703565cea1ae527d51c0b7bcd99fa7aa7265f53a5a8198f23ad822. Unable to find token.`","type":"token_not_found_in_db","param":"key","code":"401"}}
+2026-08-12T12:37:34.140956Z  WARN openfang_kernel::kernel: Agent loop failed — recorded in supervisor agent_id=f4c80b32-7a38-44af-9bc2-aae7cfca1e62 error=LLM driver error: Auth error: {"error":{"message":"Authentication Error, Invalid proxy server token passed. Received API Key = sk-...f0b4, Key Hash (Token) =2a7ef11703703565cea1ae527d51c0b7bcd99fa7aa7265f53a5a8198f23ad822. Unab...
+2026-08-12T12:37:34.140996Z  WARN openfang_api::routes: send_message failed for agent f4c80b32-7a38-44af-9bc2-aae7cfca1e62: LLM driver error: Auth error: {"error":{"message":"Authentication Error, Invalid proxy server token passed. Received API Key = sk-...f0b4, Key Hash (Token) =2a7ef11703703565cea1ae527d51c0b7bcd99fa7aa7265f53a5a8198f23ad822. Unab...
+2026-08-12T12:37:34.430518Z  WARN openfang_runtime::drivers::fallback: Fallback driver failed, trying next driver_index=0 model= error=HTTP error: error sending request for url (http://127.0.0.1:9/v1/chat/completions)
+
+=== test-a7-control ===
+--- manifest ---
+name = "test-a7-control"
+version = "1.0.0"
+description = "A-7 baseline probe"
+author = "fang-tests"
+module = "builtin:chat"
+schedule = "reactive"
+priority = "Normal"
+tags = ["test-a7"]
+
+[model]
+provider = "y7router"
+model = "kimi/k3"
+max_tokens = 256
+temperature = 0.0
+system_prompt = "You are a probe. Answer in one word."
+api_key_env = "<REDACTED>"
+--- spawn: HTTP 201  agent_id=d9ac85bb-afc6-48c5-aff8-46f06e91be90 ---
+on-disk manifest: ABSENT (registry only)
+--- POST /api/agents/d9ac85bb-afc6-48c5-aff8-46f06e91be90/message (timeout 600s) ---
+HTTP 200   (7s elapsed)
+{"input_tokens":12773,"iterations":1,"output_tokens":17,"response":"PONG"}
+
+--- daemon log for this call ---
+
+=== test-a7-inherit-hf ===
+--- manifest ---
+name = "test-a7-inherit-hf"
+version = "1.0.0"
+description = "A-7 baseline probe"
+author = "fang-tests"
+module = "builtin:chat"
+schedule = "reactive"
+priority = "Normal"
+tags = ["test-a7"]
+
+[model]
+provider = "hyperfusion"
+model = "google/gemma-4-31b-it"
+max_tokens = 256
+temperature = 0.0
+system_prompt = "You are a probe. Answer in one word."
+api_key_env = "<REDACTED>"
+base_url = "http://127.0.0.1:9/v1"
+
+[[fallback_models]]
+provider = "hyperfusion"
+model = "google/gemma-4-31b-it"
+api_key_env = "<REDACTED>"
+# base_url absent, but this provider IS [default_model].provider
+--- spawn: HTTP 201  agent_id=47385384-be03-4b34-bb92-0acf07967960 ---
+on-disk manifest: ABSENT (registry only)
+--- POST /api/agents/47385384-be03-4b34-bb92-0acf07967960/message (timeout 600s) ---
+HTTP 200   (3s elapsed)
+{"input_tokens":10965,"iterations":1,"output_tokens":3,"response":"PONG"}
+
+--- daemon log for this call ---
+2026-08-12T12:37:49.641814Z  WARN openfang_runtime::drivers::fallback: Fallback driver failed, trying next driver_index=0 model= error=HTTP error: error sending request for url (http://127.0.0.1:9/v1/chat/completions)
+
+==================================================================
+RESULT TABLE
+AGENT                HTTP     VERDICT
+test-a7-inherit      500      no response field / 401 IN BODY
+test-a7-explicit     200      answered
+test-a7-control      200      answered
+test-a7-inherit-hf   200      answered
+
+METRIC: inherit=500  explicit=200
+        control=200  inherit-hf=200
+RED baseline means: inherit != 2xx (401 in body) AND explicit == 200
+                    AND control == 200 AND inherit-hf == 200
+
+--- cleanup ---
+  cleaned test-a7-inherit (f4c80b32-7a38-44af-9bc2-aae7cfca1e62)
+  cleaned test-a7-explicit (3b82a594-431b-4ce1-85b2-74e65982b166)
+  cleaned test-a7-control (d9ac85bb-afc6-48c5-aff8-46f06e91be90)
+  cleaned test-a7-inherit-hf (47385384-be03-4b34-bb92-0acf07967960)
+done.

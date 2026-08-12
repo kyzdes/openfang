@@ -1,0 +1,56 @@
+A-2 — remove_custom_model does not recompute provider.model_count
+BASELINE (unpatched build), captured 2026-08-12T13:30:58+01:00
+stand: http://127.0.0.1:4201 (openfang-staging), image version: 0.6.9
+source: crates/openfang-runtime/src/model_catalog.rs:473-479 (remove) vs :441-465 (add)
+route:  DELETE /api/models/custom/{*id} -> routes.rs:6659 remove_custom_model
+
+=== run of tests/fang/A-2.sh ===
+== A-2 baseline probe ==
+date:     2026-08-12T13:30:59+01:00
+base_url: http://127.0.0.1:4201
+version:  0.6.9
+provider: hyperfusion
+probe id: test-a2/drift-probe
+
+step 0 (initial):        providers.model_count=9  actual=/api/models=9  drift=0
+
+step 1: POST /api/models/custom
+{
+    "id": "test-a2/drift-probe",
+    "provider": "hyperfusion",
+    "status": "added"
+}
+step 1 (after create):   providers.model_count=10  actual=10  drift=0
+
+step 2: DELETE /api/models/custom/test-a2/drift-probe
+{
+    "status": "removed"
+}
+step 2 (after delete):   providers.model_count=10  actual=9  drift=1
+
+RESULT: drift after delete = 1 model(s)
+  expected if defect present: drift=1 (counter stuck at 10, actual back to 9)
+  expected if fixed:          drift=0
+VERDICT: RED — remove_custom_model did not recompute model_count
+
+=== on-disk state at moment of drift (volume /var/lib/docker/volumes/openfang-staging-data/_data) ===
+custom_models.json: 24 entries total, 9 with provider=hyperfusion, probe model absent
+  -> disk is CORRECT; the stale number lives only in the in-memory catalog
+
+=== drift does NOT accumulate over repeated create/delete cycles ===
+cycle 2: count=10 actual=9 drift=1
+cycle 3: count=10 actual=9 drift=1
+  reason: add_custom_model recomputes the count from the model list (9+1=10),
+          so every add resets it to actual+1; only the decrement is missing.
+  -> drift is capped at 1 per provider, not cumulative.
+
+=== docker restart openfang-staging ===
+healthy after ~2s
+count after restart: 9
+actual after restart: 9
+  -> drift healed by restart, confirming an in-memory-only defect.
+
+=== METRIC BEFORE ===
+drift = providers.model_count - actual(/api/models) for hyperfusion
+  after DELETE of one custom model: drift = 1 (10 vs 9)
+  target after patch: drift = 0

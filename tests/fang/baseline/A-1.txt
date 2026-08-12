@@ -1,0 +1,52 @@
+=== A-1 baseline probe: PUT /api/agents/{id}/update ===
+date:          2026-08-12T13:31:46+01:00
+url:           http://127.0.0.1:4201
+image version: 0.6.9
+
+-- deleting stale probe f6e01bae-8dc8-4c68-80b4-475da7faa623 -> HTTP 200
+--- POST /api/agents (create probe, description=A1-BEFORE-description max_tokens=4096) ---
+{"agent_id":"3c1b4f90-ad92-4530-958a-396041a6999f","name":"test-a1-probe"}
+agent_id: 3c1b4f90-ad92-4530-958a-396041a6999f
+
+--- observable BEFORE ---
+{"description": "A1-BEFORE-description", "id": "3c1b4f90-ad92-4530-958a-396041a6999f", "model": {"model": "openai/gpt-oss-120b", "provider": "hyperfusion"}, "name": "test-a1-probe", "system_prompt": "A1-BEFORE-prompt", "tags": []}
+disk /var/lib/docker/volumes/openfang-staging-data/_data/agents/test-a1-probe/agent.toml:
+  <absent>
+
+--- PUT /api/agents/$AID/update  (description->A1-AFTER-description, max_tokens->1234, system_prompt->A1-AFTER-prompt) ---
+HTTP status: 200
+body: {"agent_id":"3c1b4f90-ad92-4530-958a-396041a6999f","note":"Full manifest update requires agent restart. Use DELETE + POST to apply.","status":"acknowledged"}
+
+--- observable AFTER ---
+{"description": "A1-BEFORE-description", "id": "3c1b4f90-ad92-4530-958a-396041a6999f", "model": {"model": "openai/gpt-oss-120b", "provider": "hyperfusion"}, "name": "test-a1-probe", "system_prompt": "A1-BEFORE-prompt", "tags": []}
+disk /var/lib/docker/volumes/openfang-staging-data/_data/agents/test-a1-probe/agent.toml:
+  <absent>
+disk verdict: UNCHANGED
+description via API: A1-BEFORE-description   (expected if applied: A1-AFTER-description)
+system_prompt via API: A1-BEFORE-prompt   (expected if applied: A1-AFTER-prompt)
+APPLIED: no
+
+--- PUT /update with the body documented in docs/api-reference.md ---
+request: {"description":"Updated description","system_prompt":"You are a specialized assistant.","tags":["updated","v2"]}
+HTTP status: 422
+body: Failed to deserialize the JSON body into the target type: missing field `manifest_toml` at line 1 column 112
+
+--- control: PATCH /api/agents/$AID {"description":"A1-PATCH-works"} ---
+HTTP status: 200
+description after PATCH: A1-PATCH-works
+PATCH APPLIED: yes
+disk /var/lib/docker/volumes/openfang-staging-data/_data/agents/test-a1-probe/agent.toml after PATCH:
+description = "A1-PATCH-works"
+max_tokens = 4096
+system_prompt = "A1-BEFORE-prompt"
+  (note: agent.toml is written only by PATCH's persist_manifest_to_disk;
+   POST /api/agents and PUT /update never touched it -- max_tokens is still 4096,
+   not the 1234 the PUT manifest asked for.)
+
+=== METRIC (baseline, unpatched) ===
+PUT /update, valid manifest_toml     -> HTTP 200, applied=no, disk=UNCHANGED
+PUT /update, documented body         -> HTTP 422
+PATCH /api/agents/{id} (control)     -> applied=yes
+
+RED if: PUT status is 200 AND applied=no AND disk=UNCHANGED AND control applied=yes.
+probe agent left in place: 3c1b4f90-ad92-4530-958a-396041a6999f / test-a1-probe

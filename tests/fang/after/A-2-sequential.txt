@@ -1,0 +1,15 @@
+== baseline for other provider (anthropic) ==
+other provider before: count=7 actual=7 drift=0
+
+== create 4 custom models on hyperfusion (no deletes yet) ==
+after 4 creates: count=13 actual=13 drift=0
+
+== sequential deletes, NO intervening creates ==
+delete #1 (test-a2/seq-1): count=12 actual=12 drift=0
+delete #2 (test-a2/seq-2): count=11 actual=11 drift=0
+delete #3 (test-a2/seq-3): count=10 actual=10 drift=0
+delete #4 (test-a2/seq-4): count=9 actual=9 drift=0
+
+== other provider (anthropic) after all this ==
+other provider after: count=7 actual=7 drift=0
+other provider UNCHANGED (good)

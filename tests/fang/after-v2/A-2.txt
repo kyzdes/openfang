@@ -1,0 +1,27 @@
+== A-2 baseline probe ==
+date:     2026-08-12T20:05:33+01:00
+base_url: http://127.0.0.1:4201
+version:  0.6.9
+provider: hyperfusion
+probe id: test-a2/drift-probe
+
+step 0 (initial):        providers.model_count=9  actual=/api/models=9  drift=0
+
+step 1: POST /api/models/custom
+{
+    "id": "test-a2/drift-probe",
+    "provider": "hyperfusion",
+    "status": "added"
+}
+step 1 (after create):   providers.model_count=10  actual=10  drift=0
+
+step 2: DELETE /api/models/custom/test-a2/drift-probe
+{
+    "status": "removed"
+}
+step 2 (after delete):   providers.model_count=9  actual=9  drift=0
+
+RESULT: drift after delete = 0 model(s)
+  expected if defect present: drift=1 (counter stuck at 10, actual back to 9)
+  expected if fixed:          drift=0
+VERDICT: GREEN — counter consistent

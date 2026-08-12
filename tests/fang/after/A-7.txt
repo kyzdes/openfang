@@ -1,0 +1,241 @@
+==================================================================
+A-7 baseline — FallbackModel base_url resolution
+date         : 2026-08-12T18:17:49Z
+base url     : http://127.0.0.1:4201
+image ver    : 0.6.9
+container    : openfang-staging (openfang:sprint1)
+dead primary : http://127.0.0.1:9/v1
+
+--- relevant config.toml (the bug needs default_model.base_url set) ---
+[default_model]
+provider = "hyperfusion"
+model = "google/gemma-4-31b-it"
+api_key_env = "<REDACTED>"
+base_url = "https://api.hyperfusion.io/v1"
+
+[provider_urls]
+hyperfusion = "https://api.hyperfusion.io/v1"
+y7router = "https://router.y7.hk/v1"
+
+
+--- cleanup (idempotency) ---
+
+=== test-a7-inherit ===
+--- manifest ---
+name = "test-a7-inherit"
+version = "1.0.0"
+description = "A-7 baseline probe"
+author = "fang-tests"
+module = "builtin:chat"
+schedule = "reactive"
+priority = "Normal"
+tags = ["test-a7"]
+
+[model]
+provider = "hyperfusion"
+model = "google/gemma-4-31b-it"
+max_tokens = 256
+temperature = 0.0
+system_prompt = "You are a probe. Answer in one word."
+api_key_env = "<REDACTED>"
+base_url = "http://127.0.0.1:9/v1"
+
+[[fallback_models]]
+provider = "y7router"
+model = "kimi/k3"
+api_key_env = "<REDACTED>"
+# base_url deliberately absent -- this is the defect under test
+--- spawn: HTTP 201  agent_id=aef6cde3-ec84-4486-b375-033baa51f6c5 ---
+on-disk manifest: ABSENT (registry only)
+--- POST /api/agents/aef6cde3-ec84-4486-b375-033baa51f6c5/message (timeout 600s) ---
+HTTP 200   (4s elapsed)
+{"fallback":{"from":"google/gemma-4-31b-it","reason":"HTTP error: error sending request for url (http://127.0.0.1:9/v1/chat/completions)","used":true},"input_tokens":8378,"iterations":1,"model_used":"kimi/k3","output_tokens":22,"provider_used":"y7router","response":"PONG"}
+
+--- daemon log for this call (lines added during it) ---
+2026-08-12T18:17:50.075935Z  WARN openfang_runtime::drivers::fallback: Fallback driver failed, trying next driver_index=0 model=google/gemma-4-31b-it error=HTTP error: error sending request for url (http://127.0.0.1:9/v1/chat/completions)
+
+=== test-a7-explicit ===
+--- manifest ---
+name = "test-a7-explicit"
+version = "1.0.0"
+description = "A-7 baseline probe"
+author = "fang-tests"
+module = "builtin:chat"
+schedule = "reactive"
+priority = "Normal"
+tags = ["test-a7"]
+
+[model]
+provider = "hyperfusion"
+model = "google/gemma-4-31b-it"
+max_tokens = 256
+temperature = 0.0
+system_prompt = "You are a probe. Answer in one word."
+api_key_env = "<REDACTED>"
+base_url = "http://127.0.0.1:9/v1"
+
+[[fallback_models]]
+provider = "y7router"
+model = "kimi/k3"
+api_key_env = "<REDACTED>"
+base_url = "https://router.y7.hk/v1"
+--- spawn: HTTP 201  agent_id=d083ef5e-86c5-4208-968a-bf4c42f56a1b ---
+on-disk manifest: ABSENT (registry only)
+--- POST /api/agents/d083ef5e-86c5-4208-968a-bf4c42f56a1b/message (timeout 600s) ---
+HTTP 200   (7s elapsed)
+{"fallback":{"from":"google/gemma-4-31b-it","reason":"HTTP error: error sending request for url (http://127.0.0.1:9/v1/chat/completions)","used":true},"input_tokens":8401,"iterations":1,"model_used":"kimi/k3","output_tokens":30,"provider_used":"y7router","response":"PONG"}
+
+--- daemon log for this call (lines added during it) ---
+2026-08-12T18:17:55.193974Z  WARN openfang_runtime::drivers::fallback: Fallback driver failed, trying next driver_index=0 model=google/gemma-4-31b-it error=HTTP error: error sending request for url (http://127.0.0.1:9/v1/chat/completions)
+
+=== test-a7-control ===
+--- manifest ---
+name = "test-a7-control"
+version = "1.0.0"
+description = "A-7 baseline probe"
+author = "fang-tests"
+module = "builtin:chat"
+schedule = "reactive"
+priority = "Normal"
+tags = ["test-a7"]
+
+[model]
+provider = "y7router"
+model = "kimi/k3"
+max_tokens = 256
+temperature = 0.0
+system_prompt = "You are a probe. Answer in one word."
+api_key_env = "<REDACTED>"
+--- spawn: HTTP 201  agent_id=2ed0f9f4-d8a4-4564-9335-c1a3e01bdbc4 ---
+on-disk manifest: ABSENT (registry only)
+--- POST /api/agents/2ed0f9f4-d8a4-4564-9335-c1a3e01bdbc4/message (timeout 600s) ---
+HTTP 200   (3s elapsed)
+{"input_tokens":8419,"iterations":1,"model_used":"kimi/k3","output_tokens":20,"provider_used":"y7router","response":"PONG"}
+
+--- daemon log for this call (lines added during it) ---
+
+=== test-a7-inherit-hf ===
+--- manifest ---
+name = "test-a7-inherit-hf"
+version = "1.0.0"
+description = "A-7 baseline probe"
+author = "fang-tests"
+module = "builtin:chat"
+schedule = "reactive"
+priority = "Normal"
+tags = ["test-a7"]
+
+[model]
+provider = "hyperfusion"
+model = "google/gemma-4-31b-it"
+max_tokens = 256
+temperature = 0.0
+system_prompt = "You are a probe. Answer in one word."
+api_key_env = "<REDACTED>"
+base_url = "http://127.0.0.1:9/v1"
+
+[[fallback_models]]
+provider = "hyperfusion"
+model = "google/gemma-4-31b-it"
+api_key_env = "<REDACTED>"
+# base_url absent, but this provider IS [default_model].provider
+--- spawn: HTTP 201  agent_id=19d46b7c-a6d5-4360-a360-9948669c43e0 ---
+on-disk manifest: ABSENT (registry only)
+--- POST /api/agents/19d46b7c-a6d5-4360-a360-9948669c43e0/message (timeout 600s) ---
+HTTP 200   (3s elapsed)
+{"fallback":{"from":"google/gemma-4-31b-it","reason":"HTTP error: error sending request for url (http://127.0.0.1:9/v1/chat/completions)","used":true},"input_tokens":11035,"iterations":1,"model_used":"google/gemma-4-31b-it","output_tokens":3,"provider_used":"hyperfusion","response":"PONG"}
+
+--- daemon log for this call (lines added during it) ---
+2026-08-12T18:18:06.501987Z  WARN openfang_runtime::drivers::fallback: Fallback driver failed, trying next driver_index=0 model=google/gemma-4-31b-it error=HTTP error: error sending request for url (http://127.0.0.1:9/v1/chat/completions)
+
+==================================================================
+RESULT TABLE
+AGENT                HTTP     VERDICT
+test-a7-inherit      200      answered
+test-a7-explicit     200      answered / 401 IN BODY
+test-a7-control      200      answered
+test-a7-inherit-hf   200      answered
+
+METRIC: inherit=200  explicit=200
+        control=200  inherit-hf=200
+RED baseline means: inherit != 2xx (401 in body) AND explicit == 200
+                    AND control == 200 AND inherit-hf == 200
+
+--- cleanup ---
+  cleaned test-a7-inherit (aef6cde3-ec84-4486-b375-033baa51f6c5)
+  removed workspace /var/lib/docker/volumes/openfang-staging-data/_data/workspaces/test-a7-inherit
+  cleaned test-a7-explicit (d083ef5e-86c5-4208-968a-bf4c42f56a1b)
+  removed workspace /var/lib/docker/volumes/openfang-staging-data/_data/workspaces/test-a7-explicit
+  cleaned test-a7-control (2ed0f9f4-d8a4-4564-9335-c1a3e01bdbc4)
+  removed workspace /var/lib/docker/volumes/openfang-staging-data/_data/workspaces/test-a7-control
+  cleaned test-a7-inherit-hf (19d46b7c-a6d5-4360-a360-9948669c43e0)
+  removed workspace /var/lib/docker/volumes/openfang-staging-data/_data/workspaces/test-a7-inherit-hf
+done.
+
+==================================================================
+SITE 2 CHECK — agent_loop.rs ModelNotFound fallback chain (not exercised by A-7.sh)
+==================================================================
+Code path confirmed by reading verify/sprint1:
+
+  kernel.rs (both send-message paths, streaming and non-streaming):
+      let mut manifest = entry.manifest.clone();
+      self.apply_fallback_base_urls(&mut manifest);   // NEW
+      ...
+      run_agent_loop(&manifest, ...) / run_agent_loop_streaming(&manifest, ...)
+
+  apply_fallback_base_urls() mutates manifest.fallback_models[i].base_url in
+  place via the same effective_fallback_base_url() helper used by resolve_driver
+  (kernel.rs:5817-5824), i.e. same-provider-as-default -> inherit dm.base_url,
+  different provider -> [provider_urls] lookup, explicit base_url always wins.
+
+  agent_loop.rs complete_with_retry (~L1327-1335) and stream_with_retry
+  (~L1533) still do exactly:
+      base_url: fb.base_url.clone(),
+  with nothing else -- unchanged by the patch. But since they read from
+  `&manifest.fallback_models` on the SAME `manifest` value that already went
+  through apply_fallback_base_urls, fb.base_url is no longer None for a
+  same-provider-as-default or catalog-known fallback: the patch baked the
+  resolved value in before the manifest ever reached agent_loop.
+
+  => Site 2 is fixed, but by pre-resolving the field the ModelNotFound branch
+     reads, not by touching agent_loop.rs itself. This matches option 2 that
+     the baseline's PATCH TARGET section proposed ("make FallbackModel carry a
+     resolved base_url populated once in the kernel").
+
+STRUCTURAL CAVEAT (could not get a clean live trigger for this exact branch):
+  resolve_driver() ALSO iterates manifest.fallback_models (kernel.rs:5788ff)
+  and folds every one that builds successfully into the SAME FallbackDriver
+  chain as the primary. Since apply_fallback_base_urls now makes create_driver
+  succeed for fallbacks that used to fail-to-construct, manifest fallbacks are
+  in practice consumed by resolve_driver's chain before a request can even
+  reach the ModelNotFound-classified branch inside agent_loop.rs's own retry
+  loop -- that second loop only fires on the residual case where resolve_driver
+  returned a bare primary (no wrapper) yet the manifest still carries
+  fallback_models, or where the whole wrapped chain's last error is itself
+  ModelNotFound. A live attempt to force exactly that combination (bogus
+  primary model against the real hyperfusion host, y7router fallback with no
+  base_url) was answered by resolve_driver's own FallbackDriver chain instead
+  (driver_index=0 -> 1, see log line below) -- i.e. site 1's fix, not site 2 --
+  because the fallback is already inside that chain:
+    WARN openfang_runtime::drivers::fallback: Fallback driver failed, trying
+         next driver_index=0 model=totally-bogus-model-xyz-999
+         error=API error (401): ...key_model_access_denied...
+    response: {"model_used":"kimi/k3","provider_used":"y7router","response":"PONG"}
+  So: code reading gives a definite yes (the field the branch reads is no
+  longer None), but no independent HTTP-level trigger of that specific branch
+  was found to confirm it end-to-end at runtime; treat the "site 2 fixed" claim
+  as code-proof, not behavior-proof.
+
+CREDENTIAL-RESOLUTION DIVERGENCE (baseline noted this as a further, distinct
+issue -- NOT part of the A-7 pass/fail metric, NOT fixed by this patch):
+  agent_loop.rs's ModelNotFound branch still resolves the fallback API key via
+      std::env::var(env_name).ok()
+  bypassing resolve_credential (vault -> dotenv -> env). Confirmed live: on
+  this staging container, `docker exec openfang-staging printenv
+  HYPERFUSION_API_KEY` returns empty -- the key lives only in
+  /var/lib/docker/volumes/openfang-staging-data/_data/secrets.env, loaded into
+  the daemon's OWN process environment at startup (dotenv), not exported to
+  the container's environment for freshly exec'd processes. Whether
+  std::env::var() inside the already-running daemon process sees it depends on
+  how that dotenv load was done (env::set_var vs. a private table) -- not
+  verified here, and orthogonal to this patch, which does not touch that line.

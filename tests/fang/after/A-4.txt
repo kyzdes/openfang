@@ -1,0 +1,221 @@
+=== A-4 baseline run
+date_utc:   2026-08-12T18:12:51Z
+base_url:   http://127.0.0.1:4201
+version:    0.6.9
+agent:      AgentGemma4
+tasks:      10
+
+agent_id:   84e6ab6b-1522-4490-a5df-6283d65bceeb
+model:      hyperfusion/google/gemma-4-31b-it
+out_dir:    /var/lib/docker/volumes/openfang-staging-data/_data/workspaces/AgentGemma4/out
+
+binary '## Current Date' literal present in openfang-staging:/usr/local/bin/openfang : 0
+?
+
+--- task 1/10 : how a bicycle derailleur works
+{
+    "input_tokens": 13225,
+    "iterations": 2,
+    "model_used": "google/gemma-4-31b-it",
+    "output_tokens": 432,
+    "provider_used": "hyperfusion",
+    "response": "I have created the file at `out/test-a4-1.md` with four sections covering the basic principle, the mechanism, the gear-changing process, and tension management."
+}
+
+    file: PRESENT (1657 bytes)
+--- task 2/10 : the life cycle of a honeybee colony
+{
+    "input_tokens": 13029,
+    "iterations": 2,
+    "model_used": "google/gemma-4-31b-it",
+    "output_tokens": 383,
+    "provider_used": "hyperfusion",
+    "response": "I have created the markdown file at `out/test-a4-2.md` detailing the life cycle of a honeybee colony across four sections: Establishment, Seasonal Maintenance, Winter Survival, and Swarming."
+}
+
+    file: PRESENT (1528 bytes)
+--- task 3/10 : types of knots used in sailing
+{
+    "input_tokens": 13071,
+    "iterations": 2,
+    "model_used": "google/gemma-4-31b-it",
+    "output_tokens": 428,
+    "provider_used": "hyperfusion",
+    "response": "I have written the guide on sailing knots to `out/test-a4-3.md`. It includes sections on the Bowline, Clove Hitch, Figure-Eight, and Square Knot."
+}
+
+    file: PRESENT (1503 bytes)
+--- task 4/10 : how lighthouses were built on rock
+{
+    "input_tokens": 28088,
+    "iterations": 4,
+    "model_used": "google/gemma-4-31b-it",
+    "output_tokens": 649,
+    "provider_used": "hyperfusion",
+    "response": "I have written the markdown file to `out/test-a4-4.md`.\n\n**Evidence:**\n* **Verified now:** I used `file_write` to create the file at the specified path.\n* **Recalled/Verified:** The technical details regarding dovetail joint
+    file: PRESENT (2080 bytes)
+--- task 5/10 : brewing green tea properly
+{
+    "input_tokens": 13077,
+    "iterations": 2,
+    "model_used": "google/gemma-4-31b-it",
+    "output_tokens": 416,
+    "provider_used": "hyperfusion",
+    "response": "I have created the markdown file at `out/test-a4-5.md` with four sections covering water temperature, leaf-to-water ratio, steeping time, and multiple infusions."
+}
+
+    file: PRESENT (1329 bytes)
+--- task 6/10 : desert plants and how they store water
+{
+    "input_tokens": 13081,
+    "iterations": 2,
+    "model_used": "google/gemma-4-31b-it",
+    "output_tokens": 411,
+    "provider_used": "hyperfusion",
+    "response": "I have created the file `out/test-a4-6.md` with four sections covering xerophyte introductions, succulence, physiological adaptations (including CAM photosynthesis), and root system strategies."
+}
+
+    file: PRESENT (1692 bytes)
+--- task 7/10 : the parts of an acoustic guitar
+{
+    "input_tokens": 13034,
+    "iterations": 2,
+    "model_used": "google/gemma-4-31b-it",
+    "output_tokens": 353,
+    "provider_used": "hyperfusion",
+    "response": "I have created the file at `out/test-a4-7.md` with four sections covering the body, neck, headstock, and strings."
+}
+
+    file: PRESENT (1310 bytes)
+--- task 8/10 : harvesting rainwater at a small house
+{
+    "input_tokens": 13040,
+    "iterations": 2,
+    "model_used": "google/gemma-4-31b-it",
+    "output_tokens": 396,
+    "provider_used": "hyperfusion",
+    "response": "The markdown file has been written to `out/test-a4-8.md`. It covers collection, storage/filtration, distribution, and maintenance."
+}
+
+    file: PRESENT (1590 bytes)
+--- task 9/10 : how paper is made from wood pulp
+{
+    "input_tokens": 13089,
+    "iterations": 2,
+    "model_used": "google/gemma-4-31b-it",
+    "output_tokens": 424,
+    "provider_used": "hyperfusion",
+    "response": "I have created the file `out/test-a4-9.md` with four sections covering the process from harvesting and pulping to bleaching and drying."
+}
+
+    file: PRESENT (1690 bytes)
+--- task 10/10 : the stages of making sourdough bread
+{
+    "input_tokens": 13046,
+    "iterations": 2,
+    "model_used": "google/gemma-4-31b-it",
+    "output_tokens": 355,
+    "provider_used": "hyperfusion",
+    "response": "I have created the sourdough guide for you at `out/test-a4-10.md`."
+}
+
+    file: PRESENT (1406 bytes)
+
+=== on-disk scan (/var/lib/docker/volumes/openfang-staging-data/_data/workspaces/AgentGemma4/out) — report is based on FILES, never on agent replies
+test-a4-1.md : clean
+test-a4-2.md : clean
+test-a4-3.md : clean
+test-a4-4.md : clean
+test-a4-5.md : clean
+test-a4-6.md : clean
+test-a4-7.md : clean
+test-a4-8.md : clean
+test-a4-9.md : clean
+test-a4-10.md : clean
+
+=== METRIC (prescribed 10-task protocol, AgentGemma4 / hyperfusion/google/gemma-4-31b-it)
+files_written:                  10 / 10
+files_with_ANY_service_section: 0 / 10
+files_with_DATE_section:        0 / 10
+
+=== corpus-wide scan of /var/lib/docker/volumes/openfang-staging-data/_data (*.md, excluding this script's test-a4-* files
+    and excluding the per-agent context files that legitimately hold headings)
+corpus_md_files: 151
+NOTE: hits still need human classification — a file under hands/ is authored
+      documentation, not agent output, and a topic like 'Skills' can be organic.
+  3  ## Current Date
+       -> /var/lib/docker/volumes/openfang-staging-data/_data/workspaces/AgentRAG2/out/7dbed435066d495fbaa3c7f1f57c35fb.md
+       -> /var/lib/docker/volumes/openfang-staging-data/_data/workspaces/AgentRAG/all/7dbed435066d495fbaa3c7f1f57c35fb.md
+       -> /var/lib/docker/volumes/openfang-staging-data/_data/workspaces/AgentRAG4/all/7dbed435066d495fbaa3c7f1f57c35fb.md
+  3  Today is 
+       -> /var/lib/docker/volumes/openfang-staging-data/_data/workspaces/AgentRAG2/out/7dbed435066d495fbaa3c7f1f57c35fb.md
+       -> /var/lib/docker/volumes/openfang-staging-data/_data/workspaces/AgentRAG/all/7dbed435066d495fbaa3c7f1f57c35fb.md
+       -> /var/lib/docker/volumes/openfang-staging-data/_data/workspaces/AgentRAG4/all/7dbed435066d495fbaa3c7f1f57c35fb.md
+  0  ## Tool Call Behavior
+  0  ## Your Tools
+  0  ## Memory
+  0  ## Skills
+  0  ## Connected Tool Servers
+  0  ## Workspace
+  0  ## Identity
+  0  ## Persona
+  0  ## User Context
+  0  ## Long-Term Memory
+  0  ## User Profile
+  1  ## Channel
+       -> /var/lib/docker/volumes/openfang-staging-data/_data/hands/youtube-insights/SKILL.md
+  0  ## Sender
+  0  ## Peer Agents
+  0  ## Safety
+  0  ## Operational Guidelines
+  0  ## Heartbeat Checklist
+  0  ## First-Run Protocol
+  0  ## Live Context
+
+=== distinct leaked documents in the corpus (deduplicated by content hash)
+7c20b1b0bcaa  2026-08-11 23:54:27  /var/lib/docker/volumes/openfang-staging-data/_data/workspaces/AgentRAG/all/7dbed435066d495fbaa3c7f1f57c35fb.md
+7c20b1b0bcaa  2026-08-11 23:54:27  /var/lib/docker/volumes/openfang-staging-data/_data/workspaces/AgentRAG2/out/7dbed435066d495fbaa3c7f1f57c35fb.md
+7c20b1b0bcaa  2026-08-11 23:56:24  /var/lib/docker/volumes/openfang-staging-data/_data/workspaces/AgentRAG4/all/7dbed435066d495fbaa3c7f1f57c35fb.md
+
+=== all service '## ' sections assembled into the system prompt (source of truth)
+crates/openfang-runtime/src/prompt_builder.rs — build_system_prompt() joins these with "\n\n":
+   :84   ## Current Date              <- the reported defect; body is "Today is {date}."
+   :143  ## Heartbeat Checklist       (autonomous agents only)
+   :195  ## First-Run Protocol
+   :219  ## Live Context
+   :245  ## Tool Call Behavior        (const TOOL_CALL_BEHAVIOR)
+   :274  ## Your Tools
+   :311  ## Memory                    (build_memory_section — injected a SECOND time by
+                                       agent_loop.rs:396 and :1624, so it can appear twice)
+   :337  ## Skills
+   :352  ## Connected Tool Servers (MCP)
+   :365  ## Workspace
+   :371  ## Identity
+   :379  ## Persona
+   :387  ## User Context
+   :393  ## Long-Term Memory
+   :404  ## User Profile              (also :409 for the unknown-name branch)
+   :449  ## Channel
+   :457  ## Sender                    (also :458, :459)
+   :466  ## Peer Agents
+   :484  ## Safety                    (const SAFETY_SECTION)
+   :493  ## Operational Guidelines    (const OPERATIONAL_GUIDELINES)
+crates/openfang-runtime/src/workspace_context.rs
+   :130  ## Workspace Context         (+ "### <filename>" subsections at :153)
+
+Injected VERBATIM with no wrapper heading — the file's own markdown headings become
+top-level prompt structure:
+   prompt_builder.rs:99   AGENTS.md          (this box: "# Agent Behavioral Guidelines",
+                                              "## Core Principles", "## Tool Usage Protocols",
+                                              "## Response Style")
+   prompt_builder.rs:205  workspace_context
+   prompt_builder.rs:232  base_system_prompt (build_identity_section)
+
+=> A fix must change the FORMAT OF SERVICE SECTIONS AS A CLASS (e.g. a non-markdown
+   delimiter, or an XML-ish envelope), not just the date line at :84.
+
+=== date format that produced the leak
+kernel.rs:2268 and kernel.rs:2851 (two call sites, identical):
+    current_date: Some(chrono::Local::now()
+        .format("%A, %B %d, %Y (%Y-%m-%d %H:%M %Z)").to_string())
+so the leaked line looks like: "Today is Tuesday, August 11, 2026 (2026-08-11 22:29 +00:00)."

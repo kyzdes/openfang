@@ -1,0 +1,81 @@
+=== A-1 adversarial check: does the 501 body tell the truth about the API? ===
+date:  2026-08-12
+stand: http://127.0.0.1:4201  (image openfang:sprint1, branch verify/sprint1, commit 05a45b0)
+probe agent: test-a1-probe / 8b050da0-01a9-4751-8af0-a8b01467f42c (created by A-1.sh)
+
+The patch replaced a lying 200 with a 501 whose body names the routes that do work.
+The body also makes a negative claim. That claim is false.
+
+Body of PUT /api/agents/{id}/update (from after/A-1.txt, verbatim):
+  "requires_recreate": {
+     "fields": ["max_iterations","heartbeat_interval_secs","capabilities",
+                "schedule","module","skills","mcp_servers"],
+     "note":  "/skills, /mcp_servers and /tools are read-only routes; there is
+               no write path for these fields.",
+     "how":   "DELETE /api/agents/{id} then POST /api/agents",
+     "warning":"The agent gets a new id; its session history does not follow."
+  }
+Commit message 05a45b0 repeats it: "(/skills, /mcp_servers and /tools are GET-only
+routes, verified in server.rs.)"
+
+--- crates/openfang-api/src/server.rs (verify/sprint1), lines 253-264 ---
+  "/api/agents/{id}/tools"        get(get_agent_tools).put(set_agent_tools)
+  "/api/agents/{id}/skills"       get(get_agent_skills).put(set_agent_skills)
+  "/api/agents/{id}/mcp_servers"  get(get_agent_mcp_servers).put(set_agent_mcp_servers)
+All three have a PUT. They are not GET-only, and they are not read-only:
+  routes.rs:7591 set_agent_skills   -> kernel.rs:3471 set_agent_skills
+                                    -> registry.rs:255 update_skills
+                                       (entry.manifest.skills = skills) + memory.save_agent
+  routes.rs:7494 set_agent_tools    -> kernel set_agent_tool_filters
+                                    -> registry.rs:277 update_tool_filters
+  routes.rs:.... set_agent_mcp_servers -> kernel.rs:3501 -> registry.rs:266
+                                       (entry.manifest.mcp_servers = servers) + save_agent
+
+--- live on the patched stand ---
+AID=8b050da0-01a9-4751-8af0-a8b01467f42c
+
+GET  /api/agents/$AID/skills   -> {"assigned":[],"mode":"all",...}
+PUT  /api/agents/$AID/skills   '{"skills":["rust-expert","github"]}'
+     -> HTTP 200 {"skills":["rust-expert","github"],"status":"ok"}
+GET  /api/agents/$AID/skills   -> assigned: ['rust-expert','github']  mode: allowlist   APPLIED
+
+GET  /api/agents/$AID/tools    -> {"tool_allowlist":[],"tool_blocklist":[]}
+PUT  /api/agents/$AID/tools    '{"tool_allowlist":["memory_recall","memory_store"]}'
+     -> HTTP 200
+GET  /api/agents/$AID/tools    -> {"tool_allowlist":["memory_recall","memory_store"],...}  APPLIED
+
+PUT  /api/agents/$AID/mcp_servers '{"mcp_servers":[]}' -> HTTP 200
+     (non-empty lists are validated against connected MCP servers; none are connected
+      on this stand, so only the empty write is demonstrable here — the write path is
+      the same registry.update_mcp_servers)
+
+state restored afterwards: skills->[] (200), tool_allowlist/blocklist->[] (200),
+GET /skills -> assigned: [] mode: all
+
+--- METRIC ---
+claims in the 501 body that are true : the 5 "use_instead" routes exist with the
+                                       listed field sets (PATCH /api/agents/{id} and
+                                       PATCH /api/agents/{id}/config were exercised by
+                                       the A-1 verifier; the other three exist in
+                                       server.rs with the listed methods)
+claims that are FALSE                : "/skills, /mcp_servers and /tools are read-only
+                                       routes; there is no write path for these fields"
+                                       -> 3 of 3 have a working PUT (2 of 3 proven live)
+consequence                          : `skills` and `mcp_servers` are listed under
+                                       requires_recreate, so the body sends the caller
+                                       to DELETE + POST — losing the agent id and its
+                                       session history — for two fields that a PUT
+                                       changes in place. That is the same failure the
+                                       patch was written to remove (a message that
+                                       misdirects a caller into destroying an agent),
+                                       reintroduced inside the fix's own body and its
+                                       commit message.
+also stale                           : docs/api-reference.md (same commit) repeats
+                                       "`skills` and `mcp_servers` have **no write
+                                       path** at all — `/skills`, `/mcp_servers` and
+                                       `/tools` are read-only routes."
+note                                 : PUT /skills persists via memory.save_agent (DB)
+                                       but does NOT rewrite agents/<name>/agent.toml
+                                       (only PATCH calls persist_manifest_to_disk).
+                                       Disk still reads skills = [] after a successful
+                                       PUT — a separate pre-existing asymmetry.

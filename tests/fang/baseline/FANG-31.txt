@@ -1,0 +1,187 @@
+================================================================================
+FANG-31 — Telegram "409 Conflict" every 64 s for 45 hours: measurement baseline
+================================================================================
+recorded         : 2026-08-12T18:25Z
+recorded by      : recon pass (read-only on prod, reproduction on staging only)
+sources of truth : /root/src/openfang (ours == upstream v0.6.9)
+prod  (READ ONLY): container openfang-openfang-1, image openfang-openfang
+                   sha256:8b010f24ebb6..., started 2026-08-10T21:59:22Z
+staging (repro)  : container openfang-staging, image openfang:sprint1
+                   sha256:6b0288c743e0..., GET /api/health -> version 0.6.9
+                   NOTE: staging runs a different image tag than prod; both
+                   report 0.6.9 and the code paths cited below are identical in
+                   /root/src/openfang, but this is an untested assumption.
+
+--------------------------------------------------------------------------------
+1. FIELD OBSERVATION ON PROD (docker logs only — no API call, no restart)
+--------------------------------------------------------------------------------
+Telegram channel first ever started : 2026-08-10T20:45:54.821Z
+First 409                           : 2026-08-10T20:45:58.950Z   (+4.1 s)
+Last 409 at recording time          : 2026-08-12T18:23:55.366Z
+Total 409 WARNs in the container log : 2566
+=> the channel has NEVER completed a conflict-free hour in its life.
+
+First minute only — real escalating backoff (a genuine competing reader):
+  20:45:58.950  retrying in 1s
+  20:46:04.981  retrying in 2s
+  20:46:11.014  retrying in 4s
+  20:46:23.047  retrying in 8s
+  20:46:47.075  retrying in 16s
+Then the process was restarted (SIGTERM at 20:47:33) and from the very next poll
+the pattern is the stable one below:
+  20:47:35.115  retrying in 1s
+  20:48:39.146  retrying in 1s   (+64.031 s)
+
+Everything after that, for 45 hours, is one single WARN per cycle, always with
+backoff == INITIAL_BACKOFF (1s), 56.25 per hour == one per 64.0 s:
+
+  hour            count  backoff value
+  2026-08-11T00      56  1s
+  2026-08-11T12      56  1s
+  2026-08-12T00      56  1s
+  2026-08-12T12      56  1s
+  (46 consecutive hours, 53-57 per hour, no other backoff value; the only
+   exceptions in 46 h are one 4s at 2026-08-11T01 and the 502 outage burst)
+
+Six consecutive intervals, measured from the container log (ms precision):
+  17:42:18.488 -> 17:43:22.510   64.022 s
+  17:43:22.510 -> 17:44:26.533   64.023 s
+  17:44:26.533 -> 17:45:30.555   64.022 s
+  17:45:30.555 -> 17:46:34.576   64.021 s
+  17:46:34.576 -> 17:47:38.599   64.023 s
+  17:47:38.599 -> 17:48:42.621   64.022 s
+=> METRIC (prod, red): 409 per 64.02 s == 1350 per day, 0 spread.
+
+--------------------------------------------------------------------------------
+2. HOW MANY POLLERS THE DAEMON ACTUALLY RUNS (prod, read-only)
+--------------------------------------------------------------------------------
+docker top openfang-openfang-1:
+  root  300593  300568  openfang start          <- exactly one process
+
+Sockets, sampled 6x over 40 s inside the container's netns (nsenter, no process
+spawned in the container):
+  ESTAB  172.19.0.2:38314  149.154.166.110:443  users:(("openfang",pid=300593,fd=12))
+  ... same single socket, same local port, every sample.
+
+Every other netns on the box (all containers + host) — zero connections to
+149.154.0.0/16 or 91.108.0.0/16. No second poller anywhere on this machine.
+
+Passive packet timing (nsenter -n tcpdump, PUSH packets only, TLS opaque):
+  19:07:23.013  Out 284   <- getUpdates
+  19:07:53.021  In  437       200, empty result, held exactly 30.008 s
+  19:07:54.024  Out 284   <- getUpdates            (+1.003 s = poll_interval)
+  19:07:55.023  In  514       409, answered after 0.999 s
+  19:07:56.025  Out 284   <- getUpdates            (+1.002 s = INITIAL_BACKOFF)
+  19:08:26.033  In  437       200, held 30.008 s
+  19:08:27.036  Out 284   <- getUpdates            (+1.003 s)
+  19:08:57.044  In  437       200, held 30.008 s
+  19:08:58.047  Out 284   <- getUpdates            (+1.003 s)
+  19:08:59.043  In  514       409, answered after 0.996 s
+  ...repeats identically; 3 requests per cycle, strictly sequential, one socket.
+  409-to-409 = 64.020 s. Request bytes identical (284) every time.
+
+=> The rhythm is 2 successful 30 s long polls + 1 conflicted poll:
+     2 x (LONG_POLL_TIMEOUT 30 + poll_interval_secs 1)  = 62.0 s
+     + conflict answer latency                          =  1.0 s
+     + INITIAL_BACKOFF                                  =  1.0 s
+     ------------------------------------------------------------
+                                                          64.0 s   <- observed
+   The even 64 s is produced by OUR OWN loop constants, not by two pollers.
+   Two pollers of this same code cannot produce it: they ping-pong at 1-2 s
+   spacing with exponentially growing "retrying in" values, which is exactly
+   what the log does show during the first minute above and during the real
+   502 outage at 2026-08-12T01:12 (1s,2s,4s,8s,16s,32s,60s).
+
+--------------------------------------------------------------------------------
+3. CODE FACTS (/root/src/openfang, branch ours == v0.6.9)
+--------------------------------------------------------------------------------
+crates/openfang-channels/src/telegram.rs:23-27
+    MAX_BACKOFF = 60s, INITIAL_BACKOFF = 1s, LONG_POLL_TIMEOUT = 30
+crates/openfang-types/src/config.rs:1954   poll_interval_secs default = 1
+prod config.toml [channels.telegram]        no poll_interval_secs, no api_url
+
+telegram.rs:622-764  the polling task; 682-687 is the 409 arm:
+    if status.as_u16() == 409 {
+        warn!("Telegram 409 Conflict — stale polling session, retrying in {backoff:?}");
+        tokio::time::sleep(backoff).await;
+        backoff = (backoff * 2).min(MAX_BACKOFF);
+        continue;
+    }
+  * `resp` is dropped without reading the body, so the Telegram `description`
+    ("terminated by other getUpdates request" vs "can't use getUpdates method
+    while webhook is active") is never logged — 2566 WARNs, zero diagnosis.
+  * telegram.rs:709 resets backoff to 1s after any success, so an every-third-poll
+    conflict never escalates, never counts, never changes channel status
+    (no `status()` override -> trait default, types.rs:330).
+  * telegram.rs:661 and 691 log the full URL *including the bot token*:
+      "network error: error sending request for url
+       (https://api.telegram.org/bot<TOKEN>/getUpdates)"
+    The prod token is in plain text in the container log (separate ticket).
+
+telegram.rs:813-816   stop() is the ONLY thing that signals the poller:
+    async fn stop(&self) { let _ = self.shutdown_tx.send(true); Ok(()) }
+crates/openfang-channels/src/bridge.rs:505-511  BridgeManager::stop():
+    let _ = self.shutdown_tx.send(true);           // its OWN watch, not the adapter's
+    for task in self.tasks.drain(..) { let _ = task.await; }
+  BridgeManager does not keep the adapters at all (bridge.rs:382-389) and
+  NOBODY ever calls ChannelAdapter::stop() — grep over the whole workspace finds
+  only BridgeManager::stop() call sites (server.rs:920, channel_bridge.rs:1849).
+  43 of 43 adapters implement stop() by firing their own watch sender; all 43 are
+  dead code. The polling task is therefore stopped only *implicitly*, when the
+  last Arc<TelegramAdapter> is dropped and the watch Sender dies — which happens
+  in channel_bridge.rs:1815-1817, one line before the NEW poller is started.
+
+--------------------------------------------------------------------------------
+4. REPRODUCTION ON STAGING (tests/fang/FANG-31.sh, fake token, stub API)
+--------------------------------------------------------------------------------
+Stub Telegram Bot API in the staging container's netns, enforcing Telegram's
+single-reader rule. No real token, no api.telegram.org traffic.
+
+Boot / normal operation: exactly ONE getUpdates in flight, GET with a JSON body
+carrying {"allowed_updates":[...],"timeout":30}, cycle 31 s (30 held + 1 s sleep)
+— identical to prod's wire rhythm. No double registration of the poller.
+
+One `POST /api/channels/reload` issued while a long poll is in flight, twice:
+   1.956  getUpdates START peer=41554 inflight=1
+   1.956  getUpdates ACCEPTED                       <- old poller holds the queue
+   2.011  getUpdates START peer=41574 inflight=2    <- new poller, 55 ms later
+   2.011  getUpdates 409
+   3.013  getUpdates 409     (retrying in 2s)
+   5.015  getUpdates 409     (retrying in 4s)
+   9.018  getUpdates 409     (retrying in 8s)
+  17.021  getUpdates 409     (retrying in 16s)
+  33.022  getUpdates ACCEPTED                       <- 31 s after the reload
+
+daemon log for the same window:
+  18:22:53.560  Shutting down channel adapter telegram
+  18:22:53.560  Telegram polling loop stopped        <- old task does exit...
+  18:22:53.561  Telegram bot @stub_probe_bot connected
+  18:22:53.563  Telegram 409 Conflict — retrying in 1s   ...but its long-poll
+  18:22:54.565  Telegram 409 Conflict — retrying in 2s      request was left
+  18:22:56.567  Telegram 409 Conflict — retrying in 4s      open on the server
+  18:23:00.570  Telegram 409 Conflict — retrying in 8s
+  18:23:08.573  Telegram 409 Conflict — retrying in 16s
+
+=> METRIC (staging, red), identical on two consecutive runs:
+     OF31_409_COUNT = 5      409 WARNs caused by ONE hot-reload   (want 0)
+     OF31_DEAF_SECS = 31.0   channel deaf after the reload, s     (want ~0)
+
+--------------------------------------------------------------------------------
+5. WHAT IS AND IS NOT PROVEN
+--------------------------------------------------------------------------------
+PROVEN  the daemon runs exactly one Telegram poller; the "two pollers in one
+        daemon" hypothesis is refuted for the 45-hour prod cycle (one process,
+        one socket, three sequential requests per 64 s cycle).
+PROVEN  the 64.02 s period is arithmetic of our own loop:
+        2*(LONG_POLL_TIMEOUT + poll_interval) + 1 s conflict latency + INITIAL_BACKOFF.
+PROVEN  ChannelAdapter::stop() is never called; poller cancellation is accidental
+        (Arc drop), and every hot-reload abandons an in-flight long poll, which
+        costs 5 x 409 and 31 s of deafness (reproduced twice on staging).
+NOT PROVEN  who the competing reader on the Telegram side is. It cannot be
+        identified from the client because the 409 body is discarded, and the
+        prod bot may not be probed. The conflict source recurs on a ~60-62 s
+        horizon; our 31 s stride quantises it to exactly 64 s.
+NOT PROVEN  that fixing the cancellation gap will silence the prod 64 s cycle.
+        The fix removes the reload-induced conflicts (measurable, above) and
+        makes the remaining ones diagnosable; it is not established that it ends
+        the current 45-hour beacon.

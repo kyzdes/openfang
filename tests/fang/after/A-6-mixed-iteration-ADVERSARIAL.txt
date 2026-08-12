@@ -1,0 +1,112 @@
+=== A-6 adversarial check: a turn where the fallback serves SOME iterations ===
+date:  2026-08-12
+stand: http://127.0.0.1:4201 (image openfang:sprint1, branch verify/sprint1, commit 4c30507)
+
+A-6.sh points the primary at a permanently dead port, so every iteration of every turn
+is served by the substitute. The patch's own commit message defines a different policy
+for the mixed case ("model/provider are the last call's ... the substitution marker is
+sticky"). That case was never run. This probe runs it.
+
+--- rig (no real model is called; fully deterministic) ---
+Fake OpenAI-compatible server as a container on the docker bridge (the host firewall
+drops container->host traffic, so it cannot live on the host):
+
+  docker run -d --name adv-fake -v <dir>:/app:ro --entrypoint node \
+      dokploy/dokploy:v0.29.14 /app/fake_llm.js          # IP 172.17.0.4
+
+  :8971 /fallback/v1/chat/completions -> 200, finish_reason=tool_calls
+                                         (usage 202 in / 22 out) and, as a side
+                                         effect, opens :8972 — "the primary is back"
+  :8972 /primary/v1/chat/completions  -> 200, finish_reason=stop,
+                                         "ADV-PRIMARY-WROTE-THE-FINAL-ANSWER"
+                                         (usage 101 in / 11 out)
+
+Agent test-adv-mixed: [model] provider=hyperfusion model=adv-primary
+                              base_url=http://172.17.0.4:8972/primary/v1
+                      [[fallback_models]] provider=hyperfusion model=adv-fallback
+                              base_url=http://172.17.0.4:8971/fallback/v1
+                      capabilities.tools = ["memory_store"]
+
+Iteration 1: :8972 is closed -> connection refused -> FallbackDriver moves to entry 1,
+             adv-fallback answers with a tool call (and :8972 opens).
+Iteration 2: :8972 is open -> adv-primary itself writes the final text.
+Fake's own call log confirms the split:
+  {"st":{"primary":1,"fallback":1},
+   "log":["fallback call#1 model=adv-fallback","--- opened :8972 ---",
+          "primary call#1 model=adv-primary"]}
+
+--- TURN 1 (mixed): POST /api/agents/c7dcd746-.../message {"message":"probe"} ---
+{"cost_usd":0.000402,
+ "fallback":{"from":"adv-primary",
+             "reason":"HTTP error: error sending request for url (http://172.17.0.4:8972/primary/v1/chat/completions)",
+             "used":true},
+ "input_tokens":303,"iterations":2,
+ "model_used":"adv-primary","output_tokens":33,
+ "provider_used":"hyperfusion","response":"ADV-PRIMARY-WROTE-THE-FINAL-ANSWER"}
+
+  1. model_used == fallback.from == "adv-primary".  The disclosure states the turn
+     fell back FROM adv-primary TO adv-primary.
+  2. "adv-fallback" — the model that served iteration 1 (202 of the turn's 303 input
+     tokens, 22 of its 33 output tokens) — appears NOWHERE in the response. The one
+     fact the disclosure exists to carry is absent.
+  This is exactly what agent_loop.rs DispatchTracker::resolve() produces, and the
+  patch's own unit test pins it:
+     test_dispatch_tracker_substitution_is_sticky_across_iterations
+       assert_eq!(d.model, "openai/gpt-oss-120b");
+       assert_eq!(d.fallback_from.as_deref(), Some("openai/gpt-oss-120b"));
+
+--- attribution surfaces after TURN 1 ---
+GET /api/usage/by-model   adv-primary : call_count 1 -> 2, input 101 -> 404 (+303),
+                                        output 11 -> 44 (+33), cost +0.000402
+                          adv-fallback: absent (0 calls, 0 tokens)
+  => the whole turn, including the substitute's 224 tokens, is booked to the model
+     that served only the last call. Baseline A-6's RED metric was
+     "delta[primary]=all, delta[fallback]=0 -> MISATTRIBUTED: YES".
+     For a mixed turn that is still the outcome after the patch.
+
+GET /api/agents/{id}      "last_model_used":"adv-primary","last_provider_used":"hyperfusion"
+                          -> no trace of the substitution
+GET /api/metrics          openfang_tokens_total{agent="test-adv-mixed",
+                            provider="hyperfusion",model="adv-primary"} 336
+                          -> 224 of those 336 tokens were served by adv-fallback
+
+--- TURN 2 (pure fallback, fake restarted with FB_STOP=1 so the fallback answers text) ---
+{"cost_usd":0.000177,
+ "fallback":{"from":"adv-primary","reason":"HTTP error: error sending request ...","used":true},
+ "input_tokens":150,"iterations":1,"model_used":"adv-fallback","output_tokens":9,
+ "provider_used":"hyperfusion","response":"ADV-FALLBACK-WROTE-THIS"}
+  correct — this is the case A-6.sh exercises. by-model gains a separate adv-fallback
+  row (1 call, 150/9).
+
+--- /api/metrics label churn (the same agent, one metric, two scrapes) ---
+after turn 1: openfang_tokens_total{agent="test-adv-mixed",provider="hyperfusion",model="adv-primary"}  336
+after turn 2: openfang_tokens_total{agent="test-adv-mixed",provider="hyperfusion",model="adv-fallback"} 495
+  495 = 336 + 159: the value is scheduler.get_usage(agent) — a per-AGENT rolling hourly
+  total, not a per-model one. A-6 labels it with registry.last_served, which changes
+  turn by turn. Consequences for a Prometheus consumer:
+    * series A goes stale and series B appears carrying A's tokens as well;
+    * during the 5-minute staleness window both exist, so sum(openfang_tokens_total)
+      reads 831 for 495 real tokens;
+    * increase()/rate() on series B sees a step from 0 to 495 out of nowhere;
+    * 336 of the 495 tokens are labelled with a model that did not produce them.
+  Before the patch the label was the configured model — wrong for fallback turns but
+  constant, so the series was stable. A-6.sh checked only "the label now names the
+  model that served", which is true and still leaves the metric incoherent.
+
+--- side note: 5xx never reaches the fallback chain ---
+First version of this rig had :8972 answer HTTP 500 on call #1. Result: 2 primary
+calls, 0 fallback calls, iterations=1, no `fallback` key. crates/openfang-runtime/src/
+drivers/openai.rs:714-729 treats a 500 as "model may not support tools" and retries the
+same driver without tools, so a 500 is absorbed before FallbackDriver sees an Err.
+`fallback.reason` will in practice only ever carry transport errors and 4xx.
+
+--- cost ---
+adv-primary/adv-fallback are not in the model catalog, so
+MeteringEngine::estimate_cost_with_catalog falls back to (1.0, 3.0) per million:
+0.000402 = 303/1e6*1 + 33/1e6*3. When a substitute is unknown to the catalog, A-6
+prices the turn at that invented default under the substitute's name.
+
+--- cleanup ---
+agent test-adv-mixed deleted; container adv-fake removed. The two probe turns leave
+adv-primary (2 calls, 404/44) and adv-fallback (1 call, 150/9) rows in
+/api/usage/by-model on the staging DB.

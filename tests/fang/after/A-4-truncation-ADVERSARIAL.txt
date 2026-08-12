@@ -1,0 +1,80 @@
+=== A-4 adversarial check: the 1000-char cap cuts the <file> tags it now wraps ===
+date:  2026-08-12
+branch verify/sprint1, commit 69e8d4d
+
+The commit says: "The workspace context wrapper is applied in prompt_builder after the
+1000-char cap so truncation cannot eat the closing tag." True for </workspace_context>.
+But the same patch moved the per-file subsections from `### <name>` to
+`<file name="...">...</file>` INSIDE that body, and those are still inside the cap.
+
+  prompt_builder.rs:214  sections.push(data_section("workspace_context", &cap_str(ws_ctx, 1000)));
+  workspace_context.rs:158  parts.push(format!("<file name=\"{}\">\n{}\n</file>", name, preview));
+                            (5 CONTEXT_FILES, each preview capped at 200 chars + "...")
+
+5 files x ~235 chars + the project/git lines > 1000, so cap_str truncates in the middle
+of the last <file> block and the section reaches the model with an opening tag that is
+never closed.
+
+Simulation transcribed 1:1 from cap_str (prompt_builder.rs:683), safe_truncate_str
+(str_utils.rs:9) and build_context_section (workspace_context.rs:132), run against the
+REAL workspaces of the stand
+(/var/lib/docker/volumes/openfang-staging-data/_data/workspaces/*).
+Script: tests/fang/after/A-4-truncation-sim.py
+
+AgentDeepSeek4   body=1087 chars  capped=1003  <file>=5  </file>=4  UNBALANCED
+      tail of section: ...roactive reminders to check during heartbeat cycles -->\n\n## Every Heartbeat\n- [ ] Check for pend...\n</workspace_context>
+AgentGLM52       body=1078 chars  capped=1003  <file>=5  </file>=4  UNBALANCED
+      tail of section: ...reminders to check during heartbeat cycles -->\n\n## Every Heartbeat\n- [ ] Check for pending tasks...\n</workspace_context>
+AgentGLM52B      body=1080 chars  capped=1003  <file>=5  </file>=4  UNBALANCED
+      tail of section: ...e reminders to check during heartbeat cycles -->\n\n## Every Heartbeat\n- [ ] Check for pending tas...\n</workspace_context>
+AgentGLM52C      body=1080 chars  capped=1003  <file>=5  </file>=4  UNBALANCED
+      tail of section: ...e reminders to check during heartbeat cycles -->\n\n## Every Heartbeat\n- [ ] Check for pending tas...\n</workspace_context>
+AgentGemma4      body=1080 chars  capped=1003  <file>=5  </file>=4  UNBALANCED
+      tail of section: ...e reminders to check during heartbeat cycles -->\n\n## Every Heartbeat\n- [ ] Check for pending tas...\n</workspace_context>
+AgentGptOss      body=1080 chars  capped=1003  <file>=5  </file>=4  UNBALANCED
+      tail of section: ...e reminders to check during heartbeat cycles -->\n\n## Every Heartbeat\n- [ ] Check for pending tas...\n</workspace_context>
+AgentKimi3       body=1078 chars  capped=1003  <file>=5  </file>=4  UNBALANCED
+      tail of section: ...reminders to check during heartbeat cycles -->\n\n## Every Heartbeat\n- [ ] Check for pending tasks...\n</workspace_context>
+AgentRAG         body=1070 chars  capped=1003  <file>=5  </file>=4  UNBALANCED
+      tail of section: ...s to check during heartbeat cycles -->\n\n## Every Heartbeat\n- [ ] Check for pending tasks or mess...\n</workspace_context>
+AgentRAG2        body=1073 chars  capped=1003  <file>=5  </file>=4  UNBALANCED
+      tail of section: ...ders to check during heartbeat cycles -->\n\n## Every Heartbeat\n- [ ] Check for pending tasks or m...\n</workspace_context>
+AgentRAG3        body=1073 chars  capped=1003  <file>=5  </file>=4  UNBALANCED
+      tail of section: ...ders to check during heartbeat cycles -->\n\n## Every Heartbeat\n- [ ] Check for pending tasks or m...\n</workspace_context>
+AgentRAG4        body=1073 chars  capped=1003  <file>=5  </file>=4  UNBALANCED
+      tail of section: ...ders to check during heartbeat cycles -->\n\n## Every Heartbeat\n- [ ] Check for pending tasks or m...\n</workspace_context>
+assistant        body= 817 chars  capped= 817  <file>=4  </file>=4  ok
+test-a1-probe    body= 827 chars  capped= 827  <file>=4  </file>=4  ok
+test-adv-mixed   body= 848 chars  capped= 848  <file>=4  </file>=4  ok
+youtube-insights body= 852 chars  capped= 852  <file>=4  </file>=4  ok
+
+agents with an unclosed <file> tag inside <workspace_context>: 11
+opens=5 closes=4  -> 120 of 120 orderings
+
+The last line is an exhaustive check over all 120 HashMap orderings of CONTEXT_FILES for
+AgentGemma4: the imbalance is order-independent (self.cache is a HashMap, so which file
+gets cut varies between processes — whether it gets cut does not).
+
+--- METRIC ---
+agents on the stand whose <workspace_context> reaches the model with 5 `<file name="...">`
+opens and 4 `</file>` closes:            11 of 14
+(the 3 clean ones are the agents with no HEARTBEAT.md: assistant, test-a1-probe,
+youtube-insights — 4 files, 817-852 chars, under the cap)
+
+Side observations on the same body:
+* The truncated tail is raw file content, and these files contain their own markdown
+  headings: every affected agent's prompt ends the section with e.g.
+  "## Every Heartbeat\n- [ ] Check for pending tasks..." followed by "..." and then
+  </workspace_context>. The patch's pinning test
+  test_only_instruction_prose_keeps_markdown_headings asserts that the prompt contains
+  exactly 5 `## ` lines, but its fixture's workspace_context ("- Project: openfang
+  (Rust)\n<file name=\"SOUL.md\">\nBe nice\n</file>") and its heartbeat_md ("- Check the
+  inbox every hour.") carry no headings. On real data (AGENTS.md, HEARTBEAT.md) the
+  built prompt has more `## ` lines than the test pins, so the "accepted risk" is
+  pinned only against synthetic input.
+* data_section() interpolates without escaping, and workspace files are agent-writable.
+  A file containing the literal text "</workspace_context>" or "</file>" forges a
+  section boundary in the next turn's system prompt. That was possible with `## `
+  headings too, but a closing XML-ish tag is a stronger structural signal to the model
+  — and the truncation above already makes malformed tags the normal case for 11 of 14
+  agents.

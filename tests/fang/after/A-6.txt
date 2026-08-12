@@ -1,0 +1,573 @@
+==================================================================
+A-6 baseline — silent model substitution by FallbackDriver
+date          : 2026-08-12T18:15:36Z
+base url      : http://127.0.0.1:4201
+image version : 0.6.9
+container     : openfang-staging (openfang:sprint1)
+image id      : sha256:6b0288c743e0800d44c643c13d6ac7c024418a5c7f86e2d569a42b65aaa92051
+primary model : openai/gpt-oss-120b
+fallback model: google/gemma-4-31b-it
+dead base_url : http://127.0.0.1:9/v1   (primary of test-a6-fallback)
+live base_url : https://api.hyperfusion.io/v1
+turns         : 10
+
+--- config.toml, relevant tables (secrets redacted) ---
+[default_model]
+provider = "hyperfusion"
+model = "google/gemma-4-31b-it"
+api_key_env = "<REDACTED>"
+base_url = "https://api.hyperfusion.io/v1"
+
+[provider_urls]
+hyperfusion = "https://api.hyperfusion.io/v1"
+y7router = "https://router.y7.hk/v1"
+
+
+--- global [[fallback_providers]] in config.toml? ---
+absent — the chain is exactly [primary, manifest fallback], length 2.
+
+--- judge self-test (guards against a vacuous red) ---
+  body naming the model     -> DETERMINABLE: YES  (must be YES)
+  body with the 4 real keys -> DETERMINABLE: NO  (must be NO)
+  judge OK
+
+--- cleanup (idempotency) ---
+
+--- usage attributed by model BEFORE the run ---
+{"models":[{"call_count":74,"model":"openai/gpt-oss-120b","total_cost_usd":0.2386317,"total_input_tokens":1347260,"total_output_tokens":33725},{"call_count":17,"model":"kimi/k3","total_cost_usd":0.005564,"total_input_tokens":6575359,"total_output_tokens":5798},{"call_count":28,"model":"google/gemma-4-31b-it","total_cost_usd":0.0,"total_input_tokens":421770,"total_output_tokens":10433},{"call_count":79,"model":"ark/glm-5.2","total_cost_usd":0.0,"total_input_tokens":6186723,"total_output_tokens":446743},{"call_count":2,"model":"ark/deepseek-v4-pro","total_cost_usd":0.0,"total_input_tokens":17069,"total_output_tokens":48}]}
+HTTP:200
+
+
+--- spawning ---
+test-a6-fallback = ab689280-440b-4b0c-93ea-6dde2ecd2505
+test-a6-control  = 8ee7d806-c9a6-40d1-aed0-9a04f13c9286
+
+--- GET /api/agents/$FB_ID  (does any field name a model?) ---
+top-level keys: capabilities,created_at,description,fallback_models,id,identity,last_model_used,last_provider_used,mcp_servers,mcp_servers_mode,mode,model,name,profile,session_id,skills,skills_mode,state,system_prompt,tags
+model field   : {"model": "openai/gpt-oss-120b", "provider": "hyperfusion"}
+
+=================== turn 1/10 ===================
+prompt: What is 2 plus 3?
+HTTP 200   (2s)
+--- response headers ---
+HTTP/1.1 200 OK
+content-type: application/json
+x-content-type-options: nosniff
+x-frame-options: DENY
+x-xss-protection: 1; mode=block
+content-security-policy: default-src 'none'; frame-ancestors 'none'
+referrer-policy: strict-origin-when-cross-origin
+cache-control: no-store, no-cache, must-revalidate
+strict-transport-security: max-age=63072000; includeSubDomains
+x-request-id: 0984fe8c-0df5-4249-8add-e19c19f495b5
+vary: accept-encoding
+vary: origin, access-control-request-method, access-control-request-headers
+content-length: 285
+date: Wed, 12 Aug 2026 18:15:39 GMT
+--- response body (verbatim) ---
+{"fallback":{"from":"openai/gpt-oss-120b","reason":"HTTP error: error sending request for url (http://127.0.0.1:9/v1/chat/completions)","used":true},"input_tokens":10982,"iterations":1,"model_used":"google/gemma-4-31b-it","output_tokens":2,"provider_used":"hyperfusion","response":"5"}
+--- determinability ---
+KEYS        : fallback,input_tokens,iterations,model_used,output_tokens,provider_used,response
+IDENT_KEYS  : fallback,model_used,provider_used
+MODEL_NAMED : gemma,gpt
+DETERMINABLE: YES
+--- daemon log lines added by this turn ---
+2026-08-12T18:15:37.251658Z  INFO openfang_kernel::kernel: Tools selected for LLM request agent=test-a6-fallback agent_id=ab689280-440b-4b0c-93ea-6dde2ecd2505 tool_count=65 tool_names=["file_read", "file_write", "file_list", "create_directory", "apply_patch", "web_fetch", "web_search", "shell_exec", "agent_send", "agent_spawn", "agent_list", "agent_kill", "agent_activate", "memory_store", "memory_recall", "agent_find", "task_post", "task_claim", "task_complete", "task_list", "event_publish", "schedule_create", "schedule_list", "schedule_delete", "knowledge_add_entity", "knowledge_add_relation", "knowledge_query", "image_analyze", "location_get", "browser_navigate", "browser_click", "browser_type", "browser_screenshot", "browser_read_page", "browser_close", "browser_scroll", "browser_wait", "browser_run_js", "browser_back", "media_describe", "media_transcribe", "image_generate", "cron_create", "cron_list", "cron_cancel", "channel_send", "hand_list", "hand_activate", "hand_status", "hand_deactivate", "a2a_discover", "a2a_send", "text_to_speech", "speech_to_text", "docker_exec", "process_start", "process_poll", "process_write", "process_kill", "process_list", "system_time", "canvas_present", "skill_list", "skill_describe", "skill_execute"]
+2026-08-12T18:15:37.252856Z  INFO openfang_runtime::agent_loop: Starting agent loop agent=test-a6-fallback
+2026-08-12T18:15:37.256674Z  WARN openfang_runtime::drivers::fallback: Fallback driver failed, trying next driver_index=0 model=openai/gpt-oss-120b error=HTTP error: error sending request for url (http://127.0.0.1:9/v1/chat/completions)
+2026-08-12T18:15:39.883352Z  INFO openfang_runtime::agent_loop: Agent loop completed agent=test-a6-fallback iterations=1 tokens=10984
+
+=================== turn 2/10 ===================
+prompt: What is 7 minus 4?
+HTTP 200   (2s)
+--- response headers ---
+HTTP/1.1 200 OK
+content-type: application/json
+x-content-type-options: nosniff
+x-frame-options: DENY
+x-xss-protection: 1; mode=block
+content-security-policy: default-src 'none'; frame-ancestors 'none'
+referrer-policy: strict-origin-when-cross-origin
+cache-control: no-store, no-cache, must-revalidate
+strict-transport-security: max-age=63072000; includeSubDomains
+x-request-id: 66fac74b-2949-44cf-901a-6e83df2d53f8
+vary: accept-encoding
+vary: origin, access-control-request-method, access-control-request-headers
+content-length: 285
+date: Wed, 12 Aug 2026 18:15:42 GMT
+--- response body (verbatim) ---
+{"fallback":{"from":"openai/gpt-oss-120b","reason":"HTTP error: error sending request for url (http://127.0.0.1:9/v1/chat/completions)","used":true},"input_tokens":10982,"iterations":1,"model_used":"google/gemma-4-31b-it","output_tokens":2,"provider_used":"hyperfusion","response":"3"}
+--- determinability ---
+KEYS        : fallback,input_tokens,iterations,model_used,output_tokens,provider_used,response
+IDENT_KEYS  : fallback,model_used,provider_used
+MODEL_NAMED : gemma,gpt
+DETERMINABLE: YES
+--- daemon log lines added by this turn ---
+2026-08-12T18:15:40.147302Z  INFO openfang_kernel::kernel: Tools selected for LLM request agent=test-a6-fallback agent_id=ab689280-440b-4b0c-93ea-6dde2ecd2505 tool_count=65 tool_names=["file_read", "file_write", "file_list", "create_directory", "apply_patch", "web_fetch", "web_search", "shell_exec", "agent_send", "agent_spawn", "agent_list", "agent_kill", "agent_activate", "memory_store", "memory_recall", "agent_find", "task_post", "task_claim", "task_complete", "task_list", "event_publish", "schedule_create", "schedule_list", "schedule_delete", "knowledge_add_entity", "knowledge_add_relation", "knowledge_query", "image_analyze", "location_get", "browser_navigate", "browser_click", "browser_type", "browser_screenshot", "browser_read_page", "browser_close", "browser_scroll", "browser_wait", "browser_run_js", "browser_back", "media_describe", "media_transcribe", "image_generate", "cron_create", "cron_list", "cron_cancel", "channel_send", "hand_list", "hand_activate", "hand_status", "hand_deactivate", "a2a_discover", "a2a_send", "text_to_speech", "speech_to_text", "docker_exec", "process_start", "process_poll", "process_write", "process_kill", "process_list", "system_time", "canvas_present", "skill_list", "skill_describe", "skill_execute"]
+2026-08-12T18:15:40.148263Z  INFO openfang_runtime::agent_loop: Starting agent loop agent=test-a6-fallback
+2026-08-12T18:15:40.150140Z  WARN openfang_runtime::drivers::fallback: Fallback driver failed, trying next driver_index=0 model=openai/gpt-oss-120b error=HTTP error: error sending request for url (http://127.0.0.1:9/v1/chat/completions)
+2026-08-12T18:15:42.283887Z  INFO openfang_runtime::agent_loop: Agent loop completed agent=test-a6-fallback iterations=1 tokens=10984
+
+=================== turn 3/10 ===================
+prompt: What is 6 times 6?
+HTTP 200   (2s)
+--- response headers ---
+HTTP/1.1 200 OK
+content-type: application/json
+x-content-type-options: nosniff
+x-frame-options: DENY
+x-xss-protection: 1; mode=block
+content-security-policy: default-src 'none'; frame-ancestors 'none'
+referrer-policy: strict-origin-when-cross-origin
+cache-control: no-store, no-cache, must-revalidate
+strict-transport-security: max-age=63072000; includeSubDomains
+x-request-id: ca0a8d8e-de86-4a2c-af79-ed81b6215dbe
+vary: accept-encoding
+vary: origin, access-control-request-method, access-control-request-headers
+content-length: 286
+date: Wed, 12 Aug 2026 18:15:44 GMT
+--- response body (verbatim) ---
+{"fallback":{"from":"openai/gpt-oss-120b","reason":"HTTP error: error sending request for url (http://127.0.0.1:9/v1/chat/completions)","used":true},"input_tokens":10982,"iterations":1,"model_used":"google/gemma-4-31b-it","output_tokens":3,"provider_used":"hyperfusion","response":"36"}
+--- determinability ---
+KEYS        : fallback,input_tokens,iterations,model_used,output_tokens,provider_used,response
+IDENT_KEYS  : fallback,model_used,provider_used
+MODEL_NAMED : gemma,gpt
+DETERMINABLE: YES
+--- daemon log lines added by this turn ---
+2026-08-12T18:15:42.499913Z  INFO openfang_kernel::kernel: Tools selected for LLM request agent=test-a6-fallback agent_id=ab689280-440b-4b0c-93ea-6dde2ecd2505 tool_count=65 tool_names=["file_read", "file_write", "file_list", "create_directory", "apply_patch", "web_fetch", "web_search", "shell_exec", "agent_send", "agent_spawn", "agent_list", "agent_kill", "agent_activate", "memory_store", "memory_recall", "agent_find", "task_post", "task_claim", "task_complete", "task_list", "event_publish", "schedule_create", "schedule_list", "schedule_delete", "knowledge_add_entity", "knowledge_add_relation", "knowledge_query", "image_analyze", "location_get", "browser_navigate", "browser_click", "browser_type", "browser_screenshot", "browser_read_page", "browser_close", "browser_scroll", "browser_wait", "browser_run_js", "browser_back", "media_describe", "media_transcribe", "image_generate", "cron_create", "cron_list", "cron_cancel", "channel_send", "hand_list", "hand_activate", "hand_status", "hand_deactivate", "a2a_discover", "a2a_send", "text_to_speech", "speech_to_text", "docker_exec", "process_start", "process_poll", "process_write", "process_kill", "process_list", "system_time", "canvas_present", "skill_list", "skill_describe", "skill_execute"]
+2026-08-12T18:15:42.501237Z  INFO openfang_runtime::agent_loop: Starting agent loop agent=test-a6-fallback
+2026-08-12T18:15:42.504394Z  WARN openfang_runtime::drivers::fallback: Fallback driver failed, trying next driver_index=0 model=openai/gpt-oss-120b error=HTTP error: error sending request for url (http://127.0.0.1:9/v1/chat/completions)
+2026-08-12T18:15:44.719210Z  INFO openfang_runtime::agent_loop: Agent loop completed agent=test-a6-fallback iterations=1 tokens=10985
+
+=================== turn 4/10 ===================
+prompt: What is 20 divided by 5?
+HTTP 200   (3s)
+--- response headers ---
+HTTP/1.1 200 OK
+content-type: application/json
+x-content-type-options: nosniff
+x-frame-options: DENY
+x-xss-protection: 1; mode=block
+content-security-policy: default-src 'none'; frame-ancestors 'none'
+referrer-policy: strict-origin-when-cross-origin
+cache-control: no-store, no-cache, must-revalidate
+strict-transport-security: max-age=63072000; includeSubDomains
+x-request-id: 6051ea93-87bb-4273-b29d-651bb0e02fe7
+vary: accept-encoding
+vary: origin, access-control-request-method, access-control-request-headers
+content-length: 285
+date: Wed, 12 Aug 2026 18:15:47 GMT
+--- response body (verbatim) ---
+{"fallback":{"from":"openai/gpt-oss-120b","reason":"HTTP error: error sending request for url (http://127.0.0.1:9/v1/chat/completions)","used":true},"input_tokens":10984,"iterations":1,"model_used":"google/gemma-4-31b-it","output_tokens":2,"provider_used":"hyperfusion","response":"4"}
+--- determinability ---
+KEYS        : fallback,input_tokens,iterations,model_used,output_tokens,provider_used,response
+IDENT_KEYS  : fallback,model_used,provider_used
+MODEL_NAMED : gemma,gpt
+DETERMINABLE: YES
+--- daemon log lines added by this turn ---
+2026-08-12T18:15:44.916726Z  INFO openfang_kernel::kernel: Tools selected for LLM request agent=test-a6-fallback agent_id=ab689280-440b-4b0c-93ea-6dde2ecd2505 tool_count=65 tool_names=["file_read", "file_write", "file_list", "create_directory", "apply_patch", "web_fetch", "web_search", "shell_exec", "agent_send", "agent_spawn", "agent_list", "agent_kill", "agent_activate", "memory_store", "memory_recall", "agent_find", "task_post", "task_claim", "task_complete", "task_list", "event_publish", "schedule_create", "schedule_list", "schedule_delete", "knowledge_add_entity", "knowledge_add_relation", "knowledge_query", "image_analyze", "location_get", "browser_navigate", "browser_click", "browser_type", "browser_screenshot", "browser_read_page", "browser_close", "browser_scroll", "browser_wait", "browser_run_js", "browser_back", "media_describe", "media_transcribe", "image_generate", "cron_create", "cron_list", "cron_cancel", "channel_send", "hand_list", "hand_activate", "hand_status", "hand_deactivate", "a2a_discover", "a2a_send", "text_to_speech", "speech_to_text", "docker_exec", "process_start", "process_poll", "process_write", "process_kill", "process_list", "system_time", "canvas_present", "skill_list", "skill_describe", "skill_execute"]
+2026-08-12T18:15:44.917692Z  INFO openfang_runtime::agent_loop: Starting agent loop agent=test-a6-fallback
+2026-08-12T18:15:44.919519Z  WARN openfang_runtime::drivers::fallback: Fallback driver failed, trying next driver_index=0 model=openai/gpt-oss-120b error=HTTP error: error sending request for url (http://127.0.0.1:9/v1/chat/completions)
+2026-08-12T18:15:47.067875Z  INFO openfang_runtime::agent_loop: Agent loop completed agent=test-a6-fallback iterations=1 tokens=10986
+
+=================== turn 5/10 ===================
+prompt: What is 11 plus 12?
+HTTP 200   (2s)
+--- response headers ---
+HTTP/1.1 200 OK
+content-type: application/json
+x-content-type-options: nosniff
+x-frame-options: DENY
+x-xss-protection: 1; mode=block
+content-security-policy: default-src 'none'; frame-ancestors 'none'
+referrer-policy: strict-origin-when-cross-origin
+cache-control: no-store, no-cache, must-revalidate
+strict-transport-security: max-age=63072000; includeSubDomains
+x-request-id: 9dc43900-ec20-462e-ac2c-e9ca36e26253
+vary: accept-encoding
+vary: origin, access-control-request-method, access-control-request-headers
+content-length: 286
+date: Wed, 12 Aug 2026 18:15:49 GMT
+--- response body (verbatim) ---
+{"fallback":{"from":"openai/gpt-oss-120b","reason":"HTTP error: error sending request for url (http://127.0.0.1:9/v1/chat/completions)","used":true},"input_tokens":10984,"iterations":1,"model_used":"google/gemma-4-31b-it","output_tokens":3,"provider_used":"hyperfusion","response":"23"}
+--- determinability ---
+KEYS        : fallback,input_tokens,iterations,model_used,output_tokens,provider_used,response
+IDENT_KEYS  : fallback,model_used,provider_used
+MODEL_NAMED : gemma,gpt
+DETERMINABLE: YES
+--- daemon log lines added by this turn ---
+2026-08-12T18:15:47.238888Z  INFO openfang_kernel::kernel: Tools selected for LLM request agent=test-a6-fallback agent_id=ab689280-440b-4b0c-93ea-6dde2ecd2505 tool_count=65 tool_names=["file_read", "file_write", "file_list", "create_directory", "apply_patch", "web_fetch", "web_search", "shell_exec", "agent_send", "agent_spawn", "agent_list", "agent_kill", "agent_activate", "memory_store", "memory_recall", "agent_find", "task_post", "task_claim", "task_complete", "task_list", "event_publish", "schedule_create", "schedule_list", "schedule_delete", "knowledge_add_entity", "knowledge_add_relation", "knowledge_query", "image_analyze", "location_get", "browser_navigate", "browser_click", "browser_type", "browser_screenshot", "browser_read_page", "browser_close", "browser_scroll", "browser_wait", "browser_run_js", "browser_back", "media_describe", "media_transcribe", "image_generate", "cron_create", "cron_list", "cron_cancel", "channel_send", "hand_list", "hand_activate", "hand_status", "hand_deactivate", "a2a_discover", "a2a_send", "text_to_speech", "speech_to_text", "docker_exec", "process_start", "process_poll", "process_write", "process_kill", "process_list", "system_time", "canvas_present", "skill_list", "skill_describe", "skill_execute"]
+2026-08-12T18:15:47.239684Z  INFO openfang_runtime::agent_loop: Starting agent loop agent=test-a6-fallback
+2026-08-12T18:15:47.241715Z  WARN openfang_runtime::drivers::fallback: Fallback driver failed, trying next driver_index=0 model=openai/gpt-oss-120b error=HTTP error: error sending request for url (http://127.0.0.1:9/v1/chat/completions)
+2026-08-12T18:15:49.342967Z  INFO openfang_runtime::agent_loop: Agent loop completed agent=test-a6-fallback iterations=1 tokens=10987
+
+=================== turn 6/10 ===================
+prompt: What is 9 times 3?
+HTTP 200   (2s)
+--- response headers ---
+HTTP/1.1 200 OK
+content-type: application/json
+x-content-type-options: nosniff
+x-frame-options: DENY
+x-xss-protection: 1; mode=block
+content-security-policy: default-src 'none'; frame-ancestors 'none'
+referrer-policy: strict-origin-when-cross-origin
+cache-control: no-store, no-cache, must-revalidate
+strict-transport-security: max-age=63072000; includeSubDomains
+x-request-id: 326deb04-c441-4517-90ab-e9edf559a98a
+vary: accept-encoding
+vary: origin, access-control-request-method, access-control-request-headers
+content-length: 286
+date: Wed, 12 Aug 2026 18:15:51 GMT
+--- response body (verbatim) ---
+{"fallback":{"from":"openai/gpt-oss-120b","reason":"HTTP error: error sending request for url (http://127.0.0.1:9/v1/chat/completions)","used":true},"input_tokens":10982,"iterations":1,"model_used":"google/gemma-4-31b-it","output_tokens":3,"provider_used":"hyperfusion","response":"27"}
+--- determinability ---
+KEYS        : fallback,input_tokens,iterations,model_used,output_tokens,provider_used,response
+IDENT_KEYS  : fallback,model_used,provider_used
+MODEL_NAMED : gemma,gpt
+DETERMINABLE: YES
+--- daemon log lines added by this turn ---
+2026-08-12T18:15:49.538484Z  INFO openfang_kernel::kernel: Tools selected for LLM request agent=test-a6-fallback agent_id=ab689280-440b-4b0c-93ea-6dde2ecd2505 tool_count=65 tool_names=["file_read", "file_write", "file_list", "create_directory", "apply_patch", "web_fetch", "web_search", "shell_exec", "agent_send", "agent_spawn", "agent_list", "agent_kill", "agent_activate", "memory_store", "memory_recall", "agent_find", "task_post", "task_claim", "task_complete", "task_list", "event_publish", "schedule_create", "schedule_list", "schedule_delete", "knowledge_add_entity", "knowledge_add_relation", "knowledge_query", "image_analyze", "location_get", "browser_navigate", "browser_click", "browser_type", "browser_screenshot", "browser_read_page", "browser_close", "browser_scroll", "browser_wait", "browser_run_js", "browser_back", "media_describe", "media_transcribe", "image_generate", "cron_create", "cron_list", "cron_cancel", "channel_send", "hand_list", "hand_activate", "hand_status", "hand_deactivate", "a2a_discover", "a2a_send", "text_to_speech", "speech_to_text", "docker_exec", "process_start", "process_poll", "process_write", "process_kill", "process_list", "system_time", "canvas_present", "skill_list", "skill_describe", "skill_execute"]
+2026-08-12T18:15:49.539425Z  INFO openfang_runtime::agent_loop: Starting agent loop agent=test-a6-fallback
+2026-08-12T18:15:49.542963Z  WARN openfang_runtime::drivers::fallback: Fallback driver failed, trying next driver_index=0 model=openai/gpt-oss-120b error=HTTP error: error sending request for url (http://127.0.0.1:9/v1/chat/completions)
+2026-08-12T18:15:51.676285Z  INFO openfang_runtime::agent_loop: Agent loop completed agent=test-a6-fallback iterations=1 tokens=10985
+
+=================== turn 7/10 ===================
+prompt: What is 100 minus 58?
+HTTP 200   (3s)
+--- response headers ---
+HTTP/1.1 200 OK
+content-type: application/json
+x-content-type-options: nosniff
+x-frame-options: DENY
+x-xss-protection: 1; mode=block
+content-security-policy: default-src 'none'; frame-ancestors 'none'
+referrer-policy: strict-origin-when-cross-origin
+cache-control: no-store, no-cache, must-revalidate
+strict-transport-security: max-age=63072000; includeSubDomains
+x-request-id: 8c9ef5d0-ded3-4603-a8ad-51c485b11201
+vary: accept-encoding
+vary: origin, access-control-request-method, access-control-request-headers
+content-length: 286
+date: Wed, 12 Aug 2026 18:15:54 GMT
+--- response body (verbatim) ---
+{"fallback":{"from":"openai/gpt-oss-120b","reason":"HTTP error: error sending request for url (http://127.0.0.1:9/v1/chat/completions)","used":true},"input_tokens":10985,"iterations":1,"model_used":"google/gemma-4-31b-it","output_tokens":3,"provider_used":"hyperfusion","response":"42"}
+--- determinability ---
+KEYS        : fallback,input_tokens,iterations,model_used,output_tokens,provider_used,response
+IDENT_KEYS  : fallback,model_used,provider_used
+MODEL_NAMED : gemma,gpt
+DETERMINABLE: YES
+--- daemon log lines added by this turn ---
+2026-08-12T18:15:51.853691Z  INFO openfang_kernel::kernel: Tools selected for LLM request agent=test-a6-fallback agent_id=ab689280-440b-4b0c-93ea-6dde2ecd2505 tool_count=65 tool_names=["file_read", "file_write", "file_list", "create_directory", "apply_patch", "web_fetch", "web_search", "shell_exec", "agent_send", "agent_spawn", "agent_list", "agent_kill", "agent_activate", "memory_store", "memory_recall", "agent_find", "task_post", "task_claim", "task_complete", "task_list", "event_publish", "schedule_create", "schedule_list", "schedule_delete", "knowledge_add_entity", "knowledge_add_relation", "knowledge_query", "image_analyze", "location_get", "browser_navigate", "browser_click", "browser_type", "browser_screenshot", "browser_read_page", "browser_close", "browser_scroll", "browser_wait", "browser_run_js", "browser_back", "media_describe", "media_transcribe", "image_generate", "cron_create", "cron_list", "cron_cancel", "channel_send", "hand_list", "hand_activate", "hand_status", "hand_deactivate", "a2a_discover", "a2a_send", "text_to_speech", "speech_to_text", "docker_exec", "process_start", "process_poll", "process_write", "process_kill", "process_list", "system_time", "canvas_present", "skill_list", "skill_describe", "skill_execute"]
+2026-08-12T18:15:51.854621Z  INFO openfang_runtime::agent_loop: Starting agent loop agent=test-a6-fallback
+2026-08-12T18:15:51.856237Z  WARN openfang_runtime::drivers::fallback: Fallback driver failed, trying next driver_index=0 model=openai/gpt-oss-120b error=HTTP error: error sending request for url (http://127.0.0.1:9/v1/chat/completions)
+2026-08-12T18:15:54.056635Z  INFO openfang_runtime::agent_loop: Agent loop completed agent=test-a6-fallback iterations=1 tokens=10988
+
+=================== turn 8/10 ===================
+prompt: What is 8 plus 8?
+HTTP 200   (2s)
+--- response headers ---
+HTTP/1.1 200 OK
+content-type: application/json
+x-content-type-options: nosniff
+x-frame-options: DENY
+x-xss-protection: 1; mode=block
+content-security-policy: default-src 'none'; frame-ancestors 'none'
+referrer-policy: strict-origin-when-cross-origin
+cache-control: no-store, no-cache, must-revalidate
+strict-transport-security: max-age=63072000; includeSubDomains
+x-request-id: 49c68d74-d943-4760-9750-31c0820e4672
+vary: accept-encoding
+vary: origin, access-control-request-method, access-control-request-headers
+content-length: 286
+date: Wed, 12 Aug 2026 18:15:56 GMT
+--- response body (verbatim) ---
+{"fallback":{"from":"openai/gpt-oss-120b","reason":"HTTP error: error sending request for url (http://127.0.0.1:9/v1/chat/completions)","used":true},"input_tokens":10982,"iterations":1,"model_used":"google/gemma-4-31b-it","output_tokens":3,"provider_used":"hyperfusion","response":"16"}
+--- determinability ---
+KEYS        : fallback,input_tokens,iterations,model_used,output_tokens,provider_used,response
+IDENT_KEYS  : fallback,model_used,provider_used
+MODEL_NAMED : gemma,gpt
+DETERMINABLE: YES
+--- daemon log lines added by this turn ---
+2026-08-12T18:15:54.247630Z  INFO openfang_kernel::kernel: Tools selected for LLM request agent=test-a6-fallback agent_id=ab689280-440b-4b0c-93ea-6dde2ecd2505 tool_count=65 tool_names=["file_read", "file_write", "file_list", "create_directory", "apply_patch", "web_fetch", "web_search", "shell_exec", "agent_send", "agent_spawn", "agent_list", "agent_kill", "agent_activate", "memory_store", "memory_recall", "agent_find", "task_post", "task_claim", "task_complete", "task_list", "event_publish", "schedule_create", "schedule_list", "schedule_delete", "knowledge_add_entity", "knowledge_add_relation", "knowledge_query", "image_analyze", "location_get", "browser_navigate", "browser_click", "browser_type", "browser_screenshot", "browser_read_page", "browser_close", "browser_scroll", "browser_wait", "browser_run_js", "browser_back", "media_describe", "media_transcribe", "image_generate", "cron_create", "cron_list", "cron_cancel", "channel_send", "hand_list", "hand_activate", "hand_status", "hand_deactivate", "a2a_discover", "a2a_send", "text_to_speech", "speech_to_text", "docker_exec", "process_start", "process_poll", "process_write", "process_kill", "process_list", "system_time", "canvas_present", "skill_list", "skill_describe", "skill_execute"]
+2026-08-12T18:15:54.248998Z  INFO openfang_runtime::agent_loop: Starting agent loop agent=test-a6-fallback
+2026-08-12T18:15:54.251049Z  WARN openfang_runtime::drivers::fallback: Fallback driver failed, trying next driver_index=0 model=openai/gpt-oss-120b error=HTTP error: error sending request for url (http://127.0.0.1:9/v1/chat/completions)
+2026-08-12T18:15:56.364741Z  INFO openfang_runtime::agent_loop: Agent loop completed agent=test-a6-fallback iterations=1 tokens=10985
+
+=================== turn 9/10 ===================
+prompt: What is 45 divided by 9?
+HTTP 200   (1s)
+--- response headers ---
+HTTP/1.1 200 OK
+content-type: application/json
+x-content-type-options: nosniff
+x-frame-options: DENY
+x-xss-protection: 1; mode=block
+content-security-policy: default-src 'none'; frame-ancestors 'none'
+referrer-policy: strict-origin-when-cross-origin
+cache-control: no-store, no-cache, must-revalidate
+strict-transport-security: max-age=63072000; includeSubDomains
+x-request-id: 1ce1fd3a-2aff-483d-81d2-32fd8c6061e5
+vary: accept-encoding
+vary: origin, access-control-request-method, access-control-request-headers
+content-length: 285
+date: Wed, 12 Aug 2026 18:15:57 GMT
+--- response body (verbatim) ---
+{"fallback":{"from":"openai/gpt-oss-120b","reason":"HTTP error: error sending request for url (http://127.0.0.1:9/v1/chat/completions)","used":true},"input_tokens":10984,"iterations":1,"model_used":"google/gemma-4-31b-it","output_tokens":2,"provider_used":"hyperfusion","response":"5"}
+--- determinability ---
+KEYS        : fallback,input_tokens,iterations,model_used,output_tokens,provider_used,response
+IDENT_KEYS  : fallback,model_used,provider_used
+MODEL_NAMED : gemma,gpt
+DETERMINABLE: YES
+--- daemon log lines added by this turn ---
+2026-08-12T18:15:56.564378Z  INFO openfang_kernel::kernel: Tools selected for LLM request agent=test-a6-fallback agent_id=ab689280-440b-4b0c-93ea-6dde2ecd2505 tool_count=65 tool_names=["file_read", "file_write", "file_list", "create_directory", "apply_patch", "web_fetch", "web_search", "shell_exec", "agent_send", "agent_spawn", "agent_list", "agent_kill", "agent_activate", "memory_store", "memory_recall", "agent_find", "task_post", "task_claim", "task_complete", "task_list", "event_publish", "schedule_create", "schedule_list", "schedule_delete", "knowledge_add_entity", "knowledge_add_relation", "knowledge_query", "image_analyze", "location_get", "browser_navigate", "browser_click", "browser_type", "browser_screenshot", "browser_read_page", "browser_close", "browser_scroll", "browser_wait", "browser_run_js", "browser_back", "media_describe", "media_transcribe", "image_generate", "cron_create", "cron_list", "cron_cancel", "channel_send", "hand_list", "hand_activate", "hand_status", "hand_deactivate", "a2a_discover", "a2a_send", "text_to_speech", "speech_to_text", "docker_exec", "process_start", "process_poll", "process_write", "process_kill", "process_list", "system_time", "canvas_present", "skill_list", "skill_describe", "skill_execute"]
+2026-08-12T18:15:56.565212Z  INFO openfang_runtime::agent_loop: Starting agent loop agent=test-a6-fallback
+2026-08-12T18:15:56.567353Z  WARN openfang_runtime::drivers::fallback: Fallback driver failed, trying next driver_index=0 model=openai/gpt-oss-120b error=HTTP error: error sending request for url (http://127.0.0.1:9/v1/chat/completions)
+2026-08-12T18:15:57.708093Z  INFO openfang_runtime::agent_loop: Agent loop completed agent=test-a6-fallback iterations=1 tokens=10986
+
+=================== turn 10/10 ===================
+prompt: What is 13 plus 4?
+HTTP 200   (3s)
+--- response headers ---
+HTTP/1.1 200 OK
+content-type: application/json
+x-content-type-options: nosniff
+x-frame-options: DENY
+x-xss-protection: 1; mode=block
+content-security-policy: default-src 'none'; frame-ancestors 'none'
+referrer-policy: strict-origin-when-cross-origin
+cache-control: no-store, no-cache, must-revalidate
+strict-transport-security: max-age=63072000; includeSubDomains
+x-request-id: 5c57be20-1b11-44d0-a04f-e54ee89fd5a9
+vary: accept-encoding
+vary: origin, access-control-request-method, access-control-request-headers
+content-length: 286
+date: Wed, 12 Aug 2026 18:15:59 GMT
+--- response body (verbatim) ---
+{"fallback":{"from":"openai/gpt-oss-120b","reason":"HTTP error: error sending request for url (http://127.0.0.1:9/v1/chat/completions)","used":true},"input_tokens":10983,"iterations":1,"model_used":"google/gemma-4-31b-it","output_tokens":3,"provider_used":"hyperfusion","response":"17"}
+--- determinability ---
+KEYS        : fallback,input_tokens,iterations,model_used,output_tokens,provider_used,response
+IDENT_KEYS  : fallback,model_used,provider_used
+MODEL_NAMED : gemma,gpt
+DETERMINABLE: YES
+--- daemon log lines added by this turn ---
+2026-08-12T18:15:57.870072Z  INFO openfang_kernel::kernel: Tools selected for LLM request agent=test-a6-fallback agent_id=ab689280-440b-4b0c-93ea-6dde2ecd2505 tool_count=65 tool_names=["file_read", "file_write", "file_list", "create_directory", "apply_patch", "web_fetch", "web_search", "shell_exec", "agent_send", "agent_spawn", "agent_list", "agent_kill", "agent_activate", "memory_store", "memory_recall", "agent_find", "task_post", "task_claim", "task_complete", "task_list", "event_publish", "schedule_create", "schedule_list", "schedule_delete", "knowledge_add_entity", "knowledge_add_relation", "knowledge_query", "image_analyze", "location_get", "browser_navigate", "browser_click", "browser_type", "browser_screenshot", "browser_read_page", "browser_close", "browser_scroll", "browser_wait", "browser_run_js", "browser_back", "media_describe", "media_transcribe", "image_generate", "cron_create", "cron_list", "cron_cancel", "channel_send", "hand_list", "hand_activate", "hand_status", "hand_deactivate", "a2a_discover", "a2a_send", "text_to_speech", "speech_to_text", "docker_exec", "process_start", "process_poll", "process_write", "process_kill", "process_list", "system_time", "canvas_present", "skill_list", "skill_describe", "skill_execute"]
+2026-08-12T18:15:57.871205Z  INFO openfang_runtime::agent_loop: Starting agent loop agent=test-a6-fallback
+2026-08-12T18:15:57.873485Z  WARN openfang_runtime::drivers::fallback: Fallback driver failed, trying next driver_index=0 model=openai/gpt-oss-120b error=HTTP error: error sending request for url (http://127.0.0.1:9/v1/chat/completions)
+2026-08-12T18:15:59.975226Z  INFO openfang_runtime::agent_loop: Agent loop completed agent=test-a6-fallback iterations=1 tokens=10986
+
+==================================================================
+CONTROL — same manifest, LIVE primary, so the primary serves
+HTTP 200
+--- response headers ---
+HTTP/1.1 200 OK
+content-type: application/json
+x-content-type-options: nosniff
+x-frame-options: DENY
+x-xss-protection: 1; mode=block
+content-security-policy: default-src 'none'; frame-ancestors 'none'
+referrer-policy: strict-origin-when-cross-origin
+cache-control: no-store, no-cache, must-revalidate
+strict-transport-security: max-age=63072000; includeSubDomains
+x-request-id: 57d28134-535a-4f51-8cc5-e0b64e214acb
+vary: accept-encoding
+vary: origin, access-control-request-method, access-control-request-headers
+content-length: 135
+date: Wed, 12 Aug 2026 18:16:03 GMT
+--- response body (verbatim) ---
+{"input_tokens":8557,"iterations":1,"model_used":"openai/gpt-oss-120b","output_tokens":58,"provider_used":"hyperfusion","response":"5"}
+--- determinability ---
+KEYS        : input_tokens,iterations,model_used,output_tokens,provider_used,response
+IDENT_KEYS  : model_used,provider_used
+MODEL_NAMED : gpt
+DETERMINABLE: YES
+--- daemon log for the control turn (expect NO fallback line) ---
+
+--- KEY-SET COMPARISON: fallback-served vs primary-served ---
+fallback-served keys: fallback,input_tokens,iterations,model_used,output_tokens,provider_used,response
+primary-served  keys: input_tokens,iterations,model_used,output_tokens,provider_used,response
+IDENTICAL KEY SETS  : NO
+=> a client comparing response shape CAN tell a substitution happened
+
+==================================================================
+SECOND HALF OF THE DEFECT — is model= empty at driver_index=0?
+--- all fallback/driver_index lines emitted during this run ---
+2026-08-12T18:15:37.251658Z  INFO openfang_kernel::kernel: Tools selected for LLM request agent=test-a6-fallback agent_id=ab689280-440b-4b0c-93ea-6dde2ecd2505 tool_count=65 tool_names=["file_read", "file_write", "file_list", "create_directory", "apply_patch", "web_fetch", "web_search", "shell_exec", "agent_send", "agent_spawn", "agent_list", "agent_kill", "agent_activate", "memory_store", "memory_recall", "agent_find", "task_post", "task_claim", "task_complete", "task_list", "event_publish", "schedule_create", "schedule_list", "schedule_delete", "knowledge_add_entity", "knowledge_add_relation", "knowledge_query", "image_analyze", "location_get", "browser_navigate", "browser_click", "browser_type", "browser_screenshot", "browser_read_page", "browser_close", "browser_scroll", "browser_wait", "browser_run_js", "browser_back", "media_describe", "media_transcribe", "image_generate", "cron_create", "cron_list", "cron_cancel", "channel_send", "hand_list", "hand_activate", "hand_status", "hand_deactivate", "a2a_discover", "a2a_send", "text_to_speech", "speech_to_text", "docker_exec", "process_start", "process_poll", "process_write", "process_kill", "process_list", "system_time", "canvas_present", "skill_list", "skill_describe", "skill_execute"]
+2026-08-12T18:15:37.252856Z  INFO openfang_runtime::agent_loop: Starting agent loop agent=test-a6-fallback
+2026-08-12T18:15:37.256674Z  WARN openfang_runtime::drivers::fallback: Fallback driver failed, trying next driver_index=0 model=openai/gpt-oss-120b error=HTTP error: error sending request for url (http://127.0.0.1:9/v1/chat/completions)
+2026-08-12T18:15:39.883352Z  INFO openfang_runtime::agent_loop: Agent loop completed agent=test-a6-fallback iterations=1 tokens=10984
+2026-08-12T18:15:40.147302Z  INFO openfang_kernel::kernel: Tools selected for LLM request agent=test-a6-fallback agent_id=ab689280-440b-4b0c-93ea-6dde2ecd2505 tool_count=65 tool_names=["file_read", "file_write", "file_list", "create_directory", "apply_patch", "web_fetch", "web_search", "shell_exec", "agent_send", "agent_spawn", "agent_list", "agent_kill", "agent_activate", "memory_store", "memory_recall", "agent_find", "task_post", "task_claim", "task_complete", "task_list", "event_publish", "schedule_create", "schedule_list", "schedule_delete", "knowledge_add_entity", "knowledge_add_relation", "knowledge_query", "image_analyze", "location_get", "browser_navigate", "browser_click", "browser_type", "browser_screenshot", "browser_read_page", "browser_close", "browser_scroll", "browser_wait", "browser_run_js", "browser_back", "media_describe", "media_transcribe", "image_generate", "cron_create", "cron_list", "cron_cancel", "channel_send", "hand_list", "hand_activate", "hand_status", "hand_deactivate", "a2a_discover", "a2a_send", "text_to_speech", "speech_to_text", "docker_exec", "process_start", "process_poll", "process_write", "process_kill", "process_list", "system_time", "canvas_present", "skill_list", "skill_describe", "skill_execute"]
+2026-08-12T18:15:40.148263Z  INFO openfang_runtime::agent_loop: Starting agent loop agent=test-a6-fallback
+2026-08-12T18:15:40.150140Z  WARN openfang_runtime::drivers::fallback: Fallback driver failed, trying next driver_index=0 model=openai/gpt-oss-120b error=HTTP error: error sending request for url (http://127.0.0.1:9/v1/chat/completions)
+2026-08-12T18:15:42.283887Z  INFO openfang_runtime::agent_loop: Agent loop completed agent=test-a6-fallback iterations=1 tokens=10984
+2026-08-12T18:15:42.499913Z  INFO openfang_kernel::kernel: Tools selected for LLM request agent=test-a6-fallback agent_id=ab689280-440b-4b0c-93ea-6dde2ecd2505 tool_count=65 tool_names=["file_read", "file_write", "file_list", "create_directory", "apply_patch", "web_fetch", "web_search", "shell_exec", "agent_send", "agent_spawn", "agent_list", "agent_kill", "agent_activate", "memory_store", "memory_recall", "agent_find", "task_post", "task_claim", "task_complete", "task_list", "event_publish", "schedule_create", "schedule_list", "schedule_delete", "knowledge_add_entity", "knowledge_add_relation", "knowledge_query", "image_analyze", "location_get", "browser_navigate", "browser_click", "browser_type", "browser_screenshot", "browser_read_page", "browser_close", "browser_scroll", "browser_wait", "browser_run_js", "browser_back", "media_describe", "media_transcribe", "image_generate", "cron_create", "cron_list", "cron_cancel", "channel_send", "hand_list", "hand_activate", "hand_status", "hand_deactivate", "a2a_discover", "a2a_send", "text_to_speech", "speech_to_text", "docker_exec", "process_start", "process_poll", "process_write", "process_kill", "process_list", "system_time", "canvas_present", "skill_list", "skill_describe", "skill_execute"]
+2026-08-12T18:15:42.501237Z  INFO openfang_runtime::agent_loop: Starting agent loop agent=test-a6-fallback
+2026-08-12T18:15:42.504394Z  WARN openfang_runtime::drivers::fallback: Fallback driver failed, trying next driver_index=0 model=openai/gpt-oss-120b error=HTTP error: error sending request for url (http://127.0.0.1:9/v1/chat/completions)
+2026-08-12T18:15:44.719210Z  INFO openfang_runtime::agent_loop: Agent loop completed agent=test-a6-fallback iterations=1 tokens=10985
+2026-08-12T18:15:44.916726Z  INFO openfang_kernel::kernel: Tools selected for LLM request agent=test-a6-fallback agent_id=ab689280-440b-4b0c-93ea-6dde2ecd2505 tool_count=65 tool_names=["file_read", "file_write", "file_list", "create_directory", "apply_patch", "web_fetch", "web_search", "shell_exec", "agent_send", "agent_spawn", "agent_list", "agent_kill", "agent_activate", "memory_store", "memory_recall", "agent_find", "task_post", "task_claim", "task_complete", "task_list", "event_publish", "schedule_create", "schedule_list", "schedule_delete", "knowledge_add_entity", "knowledge_add_relation", "knowledge_query", "image_analyze", "location_get", "browser_navigate", "browser_click", "browser_type", "browser_screenshot", "browser_read_page", "browser_close", "browser_scroll", "browser_wait", "browser_run_js", "browser_back", "media_describe", "media_transcribe", "image_generate", "cron_create", "cron_list", "cron_cancel", "channel_send", "hand_list", "hand_activate", "hand_status", "hand_deactivate", "a2a_discover", "a2a_send", "text_to_speech", "speech_to_text", "docker_exec", "process_start", "process_poll", "process_write", "process_kill", "process_list", "system_time", "canvas_present", "skill_list", "skill_describe", "skill_execute"]
+2026-08-12T18:15:44.917692Z  INFO openfang_runtime::agent_loop: Starting agent loop agent=test-a6-fallback
+2026-08-12T18:15:44.919519Z  WARN openfang_runtime::drivers::fallback: Fallback driver failed, trying next driver_index=0 model=openai/gpt-oss-120b error=HTTP error: error sending request for url (http://127.0.0.1:9/v1/chat/completions)
+2026-08-12T18:15:47.067875Z  INFO openfang_runtime::agent_loop: Agent loop completed agent=test-a6-fallback iterations=1 tokens=10986
+2026-08-12T18:15:47.238888Z  INFO openfang_kernel::kernel: Tools selected for LLM request agent=test-a6-fallback agent_id=ab689280-440b-4b0c-93ea-6dde2ecd2505 tool_count=65 tool_names=["file_read", "file_write", "file_list", "create_directory", "apply_patch", "web_fetch", "web_search", "shell_exec", "agent_send", "agent_spawn", "agent_list", "agent_kill", "agent_activate", "memory_store", "memory_recall", "agent_find", "task_post", "task_claim", "task_complete", "task_list", "event_publish", "schedule_create", "schedule_list", "schedule_delete", "knowledge_add_entity", "knowledge_add_relation", "knowledge_query", "image_analyze", "location_get", "browser_navigate", "browser_click", "browser_type", "browser_screenshot", "browser_read_page", "browser_close", "browser_scroll", "browser_wait", "browser_run_js", "browser_back", "media_describe", "media_transcribe", "image_generate", "cron_create", "cron_list", "cron_cancel", "channel_send", "hand_list", "hand_activate", "hand_status", "hand_deactivate", "a2a_discover", "a2a_send", "text_to_speech", "speech_to_text", "docker_exec", "process_start", "process_poll", "process_write", "process_kill", "process_list", "system_time", "canvas_present", "skill_list", "skill_describe", "skill_execute"]
+2026-08-12T18:15:47.239684Z  INFO openfang_runtime::agent_loop: Starting agent loop agent=test-a6-fallback
+2026-08-12T18:15:47.241715Z  WARN openfang_runtime::drivers::fallback: Fallback driver failed, trying next driver_index=0 model=openai/gpt-oss-120b error=HTTP error: error sending request for url (http://127.0.0.1:9/v1/chat/completions)
+2026-08-12T18:15:49.342967Z  INFO openfang_runtime::agent_loop: Agent loop completed agent=test-a6-fallback iterations=1 tokens=10987
+2026-08-12T18:15:49.538484Z  INFO openfang_kernel::kernel: Tools selected for LLM request agent=test-a6-fallback agent_id=ab689280-440b-4b0c-93ea-6dde2ecd2505 tool_count=65 tool_names=["file_read", "file_write", "file_list", "create_directory", "apply_patch", "web_fetch", "web_search", "shell_exec", "agent_send", "agent_spawn", "agent_list", "agent_kill", "agent_activate", "memory_store", "memory_recall", "agent_find", "task_post", "task_claim", "task_complete", "task_list", "event_publish", "schedule_create", "schedule_list", "schedule_delete", "knowledge_add_entity", "knowledge_add_relation", "knowledge_query", "image_analyze", "location_get", "browser_navigate", "browser_click", "browser_type", "browser_screenshot", "browser_read_page", "browser_close", "browser_scroll", "browser_wait", "browser_run_js", "browser_back", "media_describe", "media_transcribe", "image_generate", "cron_create", "cron_list", "cron_cancel", "channel_send", "hand_list", "hand_activate", "hand_status", "hand_deactivate", "a2a_discover", "a2a_send", "text_to_speech", "speech_to_text", "docker_exec", "process_start", "process_poll", "process_write", "process_kill", "process_list", "system_time", "canvas_present", "skill_list", "skill_describe", "skill_execute"]
+2026-08-12T18:15:49.539425Z  INFO openfang_runtime::agent_loop: Starting agent loop agent=test-a6-fallback
+2026-08-12T18:15:49.542963Z  WARN openfang_runtime::drivers::fallback: Fallback driver failed, trying next driver_index=0 model=openai/gpt-oss-120b error=HTTP error: error sending request for url (http://127.0.0.1:9/v1/chat/completions)
+2026-08-12T18:15:51.676285Z  INFO openfang_runtime::agent_loop: Agent loop completed agent=test-a6-fallback iterations=1 tokens=10985
+2026-08-12T18:15:51.853691Z  INFO openfang_kernel::kernel: Tools selected for LLM request agent=test-a6-fallback agent_id=ab689280-440b-4b0c-93ea-6dde2ecd2505 tool_count=65 tool_names=["file_read", "file_write", "file_list", "create_directory", "apply_patch", "web_fetch", "web_search", "shell_exec", "agent_send", "agent_spawn", "agent_list", "agent_kill", "agent_activate", "memory_store", "memory_recall", "agent_find", "task_post", "task_claim", "task_complete", "task_list", "event_publish", "schedule_create", "schedule_list", "schedule_delete", "knowledge_add_entity", "knowledge_add_relation", "knowledge_query", "image_analyze", "location_get", "browser_navigate", "browser_click", "browser_type", "browser_screenshot", "browser_read_page", "browser_close", "browser_scroll", "browser_wait", "browser_run_js", "browser_back", "media_describe", "media_transcribe", "image_generate", "cron_create", "cron_list", "cron_cancel", "channel_send", "hand_list", "hand_activate", "hand_status", "hand_deactivate", "a2a_discover", "a2a_send", "text_to_speech", "speech_to_text", "docker_exec", "process_start", "process_poll", "process_write", "process_kill", "process_list", "system_time", "canvas_present", "skill_list", "skill_describe", "skill_execute"]
+2026-08-12T18:15:51.854621Z  INFO openfang_runtime::agent_loop: Starting agent loop agent=test-a6-fallback
+2026-08-12T18:15:51.856237Z  WARN openfang_runtime::drivers::fallback: Fallback driver failed, trying next driver_index=0 model=openai/gpt-oss-120b error=HTTP error: error sending request for url (http://127.0.0.1:9/v1/chat/completions)
+2026-08-12T18:15:54.056635Z  INFO openfang_runtime::agent_loop: Agent loop completed agent=test-a6-fallback iterations=1 tokens=10988
+2026-08-12T18:15:54.247630Z  INFO openfang_kernel::kernel: Tools selected for LLM request agent=test-a6-fallback agent_id=ab689280-440b-4b0c-93ea-6dde2ecd2505 tool_count=65 tool_names=["file_read", "file_write", "file_list", "create_directory", "apply_patch", "web_fetch", "web_search", "shell_exec", "agent_send", "agent_spawn", "agent_list", "agent_kill", "agent_activate", "memory_store", "memory_recall", "agent_find", "task_post", "task_claim", "task_complete", "task_list", "event_publish", "schedule_create", "schedule_list", "schedule_delete", "knowledge_add_entity", "knowledge_add_relation", "knowledge_query", "image_analyze", "location_get", "browser_navigate", "browser_click", "browser_type", "browser_screenshot", "browser_read_page", "browser_close", "browser_scroll", "browser_wait", "browser_run_js", "browser_back", "media_describe", "media_transcribe", "image_generate", "cron_create", "cron_list", "cron_cancel", "channel_send", "hand_list", "hand_activate", "hand_status", "hand_deactivate", "a2a_discover", "a2a_send", "text_to_speech", "speech_to_text", "docker_exec", "process_start", "process_poll", "process_write", "process_kill", "process_list", "system_time", "canvas_present", "skill_list", "skill_describe", "skill_execute"]
+2026-08-12T18:15:54.248998Z  INFO openfang_runtime::agent_loop: Starting agent loop agent=test-a6-fallback
+2026-08-12T18:15:54.251049Z  WARN openfang_runtime::drivers::fallback: Fallback driver failed, trying next driver_index=0 model=openai/gpt-oss-120b error=HTTP error: error sending request for url (http://127.0.0.1:9/v1/chat/completions)
+2026-08-12T18:15:56.364741Z  INFO openfang_runtime::agent_loop: Agent loop completed agent=test-a6-fallback iterations=1 tokens=10985
+2026-08-12T18:15:56.564378Z  INFO openfang_kernel::kernel: Tools selected for LLM request agent=test-a6-fallback agent_id=ab689280-440b-4b0c-93ea-6dde2ecd2505 tool_count=65 tool_names=["file_read", "file_write", "file_list", "create_directory", "apply_patch", "web_fetch", "web_search", "shell_exec", "agent_send", "agent_spawn", "agent_list", "agent_kill", "agent_activate", "memory_store", "memory_recall", "agent_find", "task_post", "task_claim", "task_complete", "task_list", "event_publish", "schedule_create", "schedule_list", "schedule_delete", "knowledge_add_entity", "knowledge_add_relation", "knowledge_query", "image_analyze", "location_get", "browser_navigate", "browser_click", "browser_type", "browser_screenshot", "browser_read_page", "browser_close", "browser_scroll", "browser_wait", "browser_run_js", "browser_back", "media_describe", "media_transcribe", "image_generate", "cron_create", "cron_list", "cron_cancel", "channel_send", "hand_list", "hand_activate", "hand_status", "hand_deactivate", "a2a_discover", "a2a_send", "text_to_speech", "speech_to_text", "docker_exec", "process_start", "process_poll", "process_write", "process_kill", "process_list", "system_time", "canvas_present", "skill_list", "skill_describe", "skill_execute"]
+2026-08-12T18:15:56.565212Z  INFO openfang_runtime::agent_loop: Starting agent loop agent=test-a6-fallback
+2026-08-12T18:15:56.567353Z  WARN openfang_runtime::drivers::fallback: Fallback driver failed, trying next driver_index=0 model=openai/gpt-oss-120b error=HTTP error: error sending request for url (http://127.0.0.1:9/v1/chat/completions)
+2026-08-12T18:15:57.708093Z  INFO openfang_runtime::agent_loop: Agent loop completed agent=test-a6-fallback iterations=1 tokens=10986
+2026-08-12T18:15:57.870072Z  INFO openfang_kernel::kernel: Tools selected for LLM request agent=test-a6-fallback agent_id=ab689280-440b-4b0c-93ea-6dde2ecd2505 tool_count=65 tool_names=["file_read", "file_write", "file_list", "create_directory", "apply_patch", "web_fetch", "web_search", "shell_exec", "agent_send", "agent_spawn", "agent_list", "agent_kill", "agent_activate", "memory_store", "memory_recall", "agent_find", "task_post", "task_claim", "task_complete", "task_list", "event_publish", "schedule_create", "schedule_list", "schedule_delete", "knowledge_add_entity", "knowledge_add_relation", "knowledge_query", "image_analyze", "location_get", "browser_navigate", "browser_click", "browser_type", "browser_screenshot", "browser_read_page", "browser_close", "browser_scroll", "browser_wait", "browser_run_js", "browser_back", "media_describe", "media_transcribe", "image_generate", "cron_create", "cron_list", "cron_cancel", "channel_send", "hand_list", "hand_activate", "hand_status", "hand_deactivate", "a2a_discover", "a2a_send", "text_to_speech", "speech_to_text", "docker_exec", "process_start", "process_poll", "process_write", "process_kill", "process_list", "system_time", "canvas_present", "skill_list", "skill_describe", "skill_execute"]
+2026-08-12T18:15:57.871205Z  INFO openfang_runtime::agent_loop: Starting agent loop agent=test-a6-fallback
+2026-08-12T18:15:57.873485Z  WARN openfang_runtime::drivers::fallback: Fallback driver failed, trying next driver_index=0 model=openai/gpt-oss-120b error=HTTP error: error sending request for url (http://127.0.0.1:9/v1/chat/completions)
+2026-08-12T18:15:59.975226Z  INFO openfang_runtime::agent_loop: Agent loop completed agent=test-a6-fallback iterations=1 tokens=10986
+
+driver_index=0 lines: 10
+  with EMPTY model= : 0
+  with a model name : 10
+VERDICT: model name IS logged — retrospective is wrong
+
+==================================================================
+IS THERE ANY OTHER API ROUTE THAT REVEALS THE ACTUAL MODEL?
+--- GET /api/agents/ab689280-440b-4b0c-93ea-6dde2ecd2505 ---
+{"capabilities":{"network":[],"tools":[]},"created_at":"2026-08-12T18:15:36.979119367+00:00","description":"A-6 baseline probe: silent model substitution","fallback_models":[{"api_key_env":"HYPERFUSION_API_KEY","base_url":"https://api.hyperfusion.io/v1","model":"google/gemma-4-31b-it","provider":"hyperfusion"}],"id":"ab689280-440b-4b0c-93ea-6dde2ecd2505","identity":{"archetype":null,"avatar_url":null,"color":null,"emoji":null,"greeting_style":null,"vibe":null},"last_model_used":"google/gemma-4-31b-it","last_provider_used":"hyperfusion","mcp_servers":[],"mcp_servers_mode":"all","mode":"full","model":{"model":"openai/gpt-oss-120b","provider":"hyperfusion"},"name":"test-a6-fallback","profile":null,"session_id":"e184fb5f-4a7f-4eab-8e74-3ab184a52e3d","skills":[],"skills_mode":"all","state":"Running","system_prompt":"You are a calculator. Answer with the number only, nothing else.","tags":["test-a6"]}
+HTTP:200
+
+--- GET /api/agents/ab689280-440b-4b0c-93ea-6dde2ecd2505/session ---
+{"agent_id":"ab689280-440b-4b0c-93ea-6dde2ecd2505","context_window_tokens":0,"label":null,"message_count":2,"messages":[{"content":"What is 13 plus 4?","role":"User"},{"content":"17","role":"Assistant"}],"raw_message_count":2,"session_id":"e184fb5f-4a7f-4eab-8e74-3ab184a52e3d"}
+HTTP:200
+
+--- GET /api/agents/ab689280-440b-4b0c-93ea-6dde2ecd2505/history ---
+
+HTTP:405
+
+--- GET /api/agents/ab689280-440b-4b0c-93ea-6dde2ecd2505/config ---
+
+HTTP:405
+
+--- GET /api/sessions ---
+{"sessions":[{"agent_id":"8ee7d806-c9a6-40d1-aed0-9a04f13c9286","created_at":"2026-08-12T18:16:00.108258838+00:00","label":null,"message_count":2,"session_id":"bb4698a2-a9ff-426d-ba0a-cbcbc8e6deab"},{"agent_id":"ab689280-440b-4b0c-93ea-6dde2ecd2505","created_at":"2026-08-12T18:15:57.794284609+00:00","label":null,"message_count":2,"session_id":"e184fb5f-4a7f-4eab-8e74-3ab184a52e3d"},{"agent_id":"84e6ab6b-1522-4490-a5df-6283d65bceeb","created_at":"2026-08-12T18:14:45.226783964+00:00","label":null,"message_count":4,"session_id":"a2a79122-5714-44f6-930d-ae5a996f5b01"},{"agent_id":"8b050da0-01a9-4751-8af0-a8b01467f42c","created_at":"2026-08-12T18:10:59.726419345+00:00","label":null,"message_count":0,"session_id":"5bf38f7f-7c18-4224-8576-e3aa99d04a0e"},{"agent_id":"bf7564a1-2c88-5fdf-8ba7-24788d4da8c1","created_at":"2026-08-12T18:09:02.278826224+00:00","label":null,"message_count":0,"session_id":"0c5b59b3-f336-41e6-96ca-27e19ef96b35"},{"agent_id":"84e6ab6b-1522-4490-a5df-6283d65bceeb","created_at":"2026-08-12T12:36:07.177002817+00:00","label":null,"message_count":4,"session_id":"578d1c32-4ea4-438a-abfd-0178783f6f3d"},{"agent_id":"7a460d1e-3195-48d8-9acf-1761d3b0815a","created_at":"2026-0
+
+--- GET /api/usage ---
+{"agents":[{"agent_id":"d5fd3e74-4add-4931-98dd-4cad91d6e923","name":"AgentGLM52C","tool_calls":0,"total_tokens":0},{"agent_id":"3db254e3-638a-453d-b7a9-04aef89087fb","name":"AgentRAG","tool_calls":0,"total_tokens":0},{"agent_id":"bf7564a1-2c88-5fdf-8ba7-24788d4da8c1","name":"youtube-insights","tool_calls":0,"total_tokens":0},{"agent_id":"8ee7d806-c9a6-40d1-aed0-9a04f13c9286","name":"test-a6-control","tool_calls":0,"total_tokens":8615},{"agent_id":"484987e6-962a-48a9-8d77-66e144f81280","name":"AgentKimi3","tool_calls":0,"total_tokens":0},{"agent_id":"8b050da0-01a9-4751-8af0-a8b01467f42c","name":"test-a1-probe","tool_calls":0,"total_tokens":0},{"agent_id":"17ffd1ca-b548-4132-a305-df3e32fbd9e3","name":"assistant","tool_calls":0,"total_tokens":0},{"agent_id":"d4dbb30b-c3ee-4245-97b4-4ebd449596fc","name":"AgentGptOss","tool_calls":0,"total_tokens":0},{"agent_id":"7a460d1e-3195-48d8-9acf-1761d3b0815a","name":"AgentRAG4","tool_calls":0,"total_tokens":0},{"agent_id":"194c8a3e-75ed-44d4-8c60-e8edaa156a95","name":"AgentRAG3","tool_calls":0,"total_tokens":0},{"agent_id":"d1c3402f-bddb-4db2-af62-a7694c402fd7","name":"AgentGLM52","tool_calls":0,"total_tokens":0},{"agent_id":"7bf4ee20-04d9-45a8
+
+--- GET /api/usage/by-model ---
+{"models":[{"call_count":75,"model":"openai/gpt-oss-120b","total_cost_usd":0.2386317,"total_input_tokens":1355817,"total_output_tokens":33783},{"call_count":17,"model":"kimi/k3","total_cost_usd":0.005564,"total_input_tokens":6575359,"total_output_tokens":5798},{"call_count":38,"model":"google/gemma-4-31b-it","total_cost_usd":0.0,"total_input_tokens":531600,"total_output_tokens":10459},{"call_count":79,"model":"ark/glm-5.2","total_cost_usd":0.0,"total_input_tokens":6186723,"total_output_tokens":446743},{"call_count":2,"model":"ark/deepseek-v4-pro","total_cost_usd":0.0,"total_input_tokens":17069,"total_output_tokens":48}]}
+HTTP:200
+
+--- GET /api/usage/summary ---
+{"call_count":211,"total_cost_usd":0.24419570000000002,"total_input_tokens":14666568,"total_output_tokens":496831,"total_tool_calls":308}
+HTTP:200
+
+--- GET /api/metrics ---
+# HELP openfang_uptime_seconds Time since daemon started.
+# TYPE openfang_uptime_seconds gauge
+openfang_uptime_seconds 421
+
+# HELP openfang_agents_active Number of active agents.
+# TYPE openfang_agents_active gauge
+openfang_agents_active 16
+# HELP openfang_agents_total Total number of registered agents.
+# TYPE openfang_agents_total gauge
+openfang_agents_total 16
+
+# HELP openfang_tokens_total Total tokens consumed (rolling hourly window).
+# TYPE openfang_tokens_total gauge
+# HELP openfang_tool_calls_total Total tool calls (rolling hourly window).
+# TYPE openfang_tool_calls_total gauge
+openfang_tokens_total{agent="AgentGLM52C",provider="y7router",model="ark/glm-5.2"} 0
+openfang_tool_calls_total{agent="AgentGLM52C"} 0
+openfang_tokens_total{agent="AgentRAG",provider="y7router",model="ark/glm-5.2"} 0
+openfang_tool_calls_total{agent="AgentRAG"} 0
+openfang_tokens_total{agent="youtube-insights",provider="hyperfusion",model="google/gemma-4-31b-it"} 0
+openfang_tool_calls_total{agent="youtube-insights"} 0
+openfang_tokens_total{agent="test-a6-control",provider="hyperfusion",model="openai/gpt-oss-120b"} 8615
+openfang_tool_calls_total{agent="test-a6-control"} 0
+openfang_tokens_total{agent="Agent
+
+--- GET /api/health/detail ---
+{"agent_count":16,"config_warnings":[],"database":"connected","panic_count":0,"restart_count":0,"status":"ok","uptime_seconds":421,"version":"0.6.9"}
+HTTP:200
+
+--- GET /api/audit/recent ---
+{"entries":[{"action":"AgentMessage","agent_id":"9a90f588-668c-46fb-b80e-3fa3169ed190","detail":"tokens_in=10912, tokens_out=2","hash":"6bd5b92c5cb9043a3db273c92e9a7faab12d549534b0d44e198eaeea4666e67e","outcome":"ok","seq":532,"timestamp":"2026-08-12T12:48:14.114988940+00:00"},{"action":"AgentMessage","agent_id":"9a90f588-668c-46fb-b80e-3fa3169ed190","detail":"tokens_in=10912, tokens_out=2","hash":"ce937b8602095e269a88473133e210b67b790f61aa63c30f45680c3539e70cf1","outcome":"ok","seq":533,"timestamp":"2026-08-12T12:48:16.356541742+00:00"},{"action":"AgentMessage","agent_id":"9a90f588-668c-46fb-b80e-3fa3169ed190","detail":"tokens_in=10912, tokens_out=3","hash":"cc3d09861640b2987a47114c3d535c9297eb6e8f658a18bbd7fe44497d503d2a","outcome":"ok","seq":534,"timestamp":"2026-08-12T12:48:18.698509219+00:00"},{"action":"AgentMessage","agent_id":"9a90f588-668c-46fb-b80e-3fa3169ed190","detail":"tokens_in=10914, tokens_out=2","hash":"c78fb729942ce9d41ee33c66892e4f09f2c25e9e777f7dcae2fd442751b0990c","outcome":"ok","seq":535,"timestamp":"2026-08-12T12:48:21.076307849+00:00"},{"action":"AgentMessage","agent_id":"9a90f588-668c-46fb-b80e-3fa3169ed190","detail":"tokens_in=10914, tokens_out=3","hash":"
+
+--- MISATTRIBUTION: /api/usage/by-model call_count delta over this run ---
+kernel.rs:2998-3012 records manifest.model.model (the PRIMARY) for every turn,
+whichever driver actually served it. If that is what happens, the 10 fallback
+turns land under openai/gpt-oss-120b — a model that answered nothing — and
+google/gemma-4-31b-it, which answered everything, gains only the control agent's share.
+  model                                         calls before calls after   delta
+  ark/deepseek-v4-pro                                      2           2       0
+  ark/glm-5.2                                             79          79       0
+  google/gemma-4-31b-it                                   28          38      10   <- actually produced every fallback answer
+  kimi/k3                                                 17          17       0
+  openai/gpt-oss-120b                                     74          75       1   <- dead primary, answered NOTHING
+
+  delta[openai/gpt-oss-120b]  = 1   (expected 10+1 if misattributed: 10 fallback turns + 1 control turn)
+  delta[google/gemma-4-31b-it] = 10   (expected 0 if misattributed, despite serving 10 turns)
+  MISATTRIBUTED: NO
+
+--- /api/metrics labels for the two probe agents ---
+openfang_tokens_total carries provider= and model= labels. They come from the
+manifest too, so check whether test-a6-fallback is labelled with the dead model.
+openfang_tokens_total{agent="test-a6-control",provider="hyperfusion",model="openai/gpt-oss-120b"} 8615
+openfang_tool_calls_total{agent="test-a6-control"} 0
+openfang_tokens_total{agent="test-a6-fallback",provider="hyperfusion",model="google/gemma-4-31b-it"} 10986
+openfang_tool_calls_total{agent="test-a6-fallback"} 0
+
+==================================================================
+SIDE PROBE (NOT part of the metric) — ask the model to name itself.
+A self-report is the model talking, not the API disclosing; models are
+routinely wrong about their own identity. Recorded for completeness only.
+{"fallback":{"from":"openai/gpt-oss-120b","reason":"HTTP error: error sending request for url (http://127.0.0.1:9/v1/chat/completions)","used":true},"input_tokens":10986,"iterations":1,"model_used":"google/gemma-4-31b-it","output_tokens":13,"provider_used":"hyperfusion","response":"google/gemma-4-31b-it"}
+HTTP:200
+  How to read this: if the text above happens to name the fallback model, that is
+  the model volunteering its identity, not the runtime reporting it. It does not
+  close the defect. It costs an extra turn, it cannot be asked retroactively about
+  a document already written, it is unverifiable (nothing cross-checks the claim),
+  and other models get this wrong or refuse. Treat it as a curiosity, not a
+  workaround.
+
+==================================================================
+DISCLOSURE CHANNELS — interpretation of the raw sections above.
+Re-read the raw output after any patch; only the first row is computed.
+  POST /api/agents/{id}/message   10 of 10 turns named the model -> DISCLOSES
+  GET  /api/agents/{id}           "model" = manifest primary        -> WRONG
+  GET  /api/agents/{id}/session   roles + text only                -> SILENT
+  GET  /api/usage/by-model        keyed on manifest primary         -> WRONG
+  GET  /api/metrics               model= label from manifest        -> WRONG
+  GET  /api/health/detail         no per-call data                  -> SILENT
+  GET  /api/audit/recent          no LLM-call entries               -> SILENT
+  docker logs (daemon WARN)       records the switch, but model= is
+                                  empty for the primary            -> PARTIAL
+  Note the distinction that matters for severity: the routes marked WRONG do not
+  merely omit the fact, they assert the configured model as though it were the one
+  that ran. A dashboard or a cost report built on them is confidently incorrect.
+
+RESULT
+turns sent                        : 10
+turns that returned a response    : 10
+turns naming the ACTUAL model     : 10
+
+METRIC (A-6 before): 10 of 10 responses disclose the model that wrote them
+RED baseline means : 0 of 10, with the log showing a fallback per turn
+                     and an empty model= at driver_index=0
+
+--- cleanup ---
+  cleaned test-a6-fallback (ab689280-440b-4b0c-93ea-6dde2ecd2505)
+  removed workspace /var/lib/docker/volumes/openfang-staging-data/_data/workspaces/test-a6-fallback
+  cleaned test-a6-control (8ee7d806-c9a6-40d1-aed0-9a04f13c9286)
+  removed workspace /var/lib/docker/volumes/openfang-staging-data/_data/workspaces/test-a6-control
+done.

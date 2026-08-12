@@ -1,0 +1,173 @@
+==================================================================
+A-7 baseline — FallbackModel base_url resolution
+date         : 2026-08-12T19:05:35Z
+base url     : http://127.0.0.1:4201
+image ver    : 0.6.9
+container    : openfang-staging (openfang:sprint1-v2)
+dead primary : http://127.0.0.1:9/v1
+
+--- relevant config.toml (the bug needs default_model.base_url set) ---
+[default_model]
+provider = "hyperfusion"
+model = "google/gemma-4-31b-it"
+api_key_env = "<REDACTED>"
+base_url = "https://api.hyperfusion.io/v1"
+
+[provider_urls]
+hyperfusion = "https://api.hyperfusion.io/v1"
+y7router = "https://router.y7.hk/v1"
+
+
+--- cleanup (idempotency) ---
+
+=== test-a7-inherit ===
+--- manifest ---
+name = "test-a7-inherit"
+version = "1.0.0"
+description = "A-7 baseline probe"
+author = "fang-tests"
+module = "builtin:chat"
+schedule = "reactive"
+priority = "Normal"
+tags = ["test-a7"]
+
+[model]
+provider = "hyperfusion"
+model = "google/gemma-4-31b-it"
+max_tokens = 256
+temperature = 0.0
+system_prompt = "You are a probe. Answer in one word."
+api_key_env = "<REDACTED>"
+base_url = "http://127.0.0.1:9/v1"
+
+[[fallback_models]]
+provider = "y7router"
+model = "kimi/k3"
+api_key_env = "<REDACTED>"
+# base_url deliberately absent -- this is the defect under test
+--- spawn: HTTP 201  agent_id=35a403b9-8db3-4970-b10b-8d5bdc43d314 ---
+on-disk manifest: ABSENT (registry only)
+--- POST /api/agents/35a403b9-8db3-4970-b10b-8d5bdc43d314/message (timeout 600s) ---
+HTTP 200   (13s elapsed)
+{"input_tokens":8376,"iterations":1,"output_tokens":6,"response":"PONG"}
+
+--- daemon log for this call (lines added during it) ---
+2026-08-12T19:05:35.463539Z  WARN openfang_runtime::drivers::fallback: Fallback driver failed, trying next driver_index=0 model= error=HTTP error: error sending request for url (http://127.0.0.1:9/v1/chat/completions)
+
+=== test-a7-explicit ===
+--- manifest ---
+name = "test-a7-explicit"
+version = "1.0.0"
+description = "A-7 baseline probe"
+author = "fang-tests"
+module = "builtin:chat"
+schedule = "reactive"
+priority = "Normal"
+tags = ["test-a7"]
+
+[model]
+provider = "hyperfusion"
+model = "google/gemma-4-31b-it"
+max_tokens = 256
+temperature = 0.0
+system_prompt = "You are a probe. Answer in one word."
+api_key_env = "<REDACTED>"
+base_url = "http://127.0.0.1:9/v1"
+
+[[fallback_models]]
+provider = "y7router"
+model = "kimi/k3"
+api_key_env = "<REDACTED>"
+base_url = "https://router.y7.hk/v1"
+--- spawn: HTTP 201  agent_id=28e7cfa3-16ca-4ad7-9be8-54a91ecdf6e6 ---
+on-disk manifest: ABSENT (registry only)
+--- POST /api/agents/28e7cfa3-16ca-4ad7-9be8-54a91ecdf6e6/message (timeout 600s) ---
+HTTP 200   (3s elapsed)
+{"input_tokens":8399,"iterations":1,"output_tokens":21,"response":"PONG"}
+
+--- daemon log for this call (lines added during it) ---
+2026-08-12T19:05:48.826393Z  WARN openfang_runtime::drivers::fallback: Fallback driver failed, trying next driver_index=0 model= error=HTTP error: error sending request for url (http://127.0.0.1:9/v1/chat/completions)
+
+=== test-a7-control ===
+--- manifest ---
+name = "test-a7-control"
+version = "1.0.0"
+description = "A-7 baseline probe"
+author = "fang-tests"
+module = "builtin:chat"
+schedule = "reactive"
+priority = "Normal"
+tags = ["test-a7"]
+
+[model]
+provider = "y7router"
+model = "kimi/k3"
+max_tokens = 256
+temperature = 0.0
+system_prompt = "You are a probe. Answer in one word."
+api_key_env = "<REDACTED>"
+--- spawn: HTTP 201  agent_id=540b4bc5-039b-49ea-b638-b21e707ed10b ---
+on-disk manifest: ABSENT (registry only)
+--- POST /api/agents/540b4bc5-039b-49ea-b638-b21e707ed10b/message (timeout 600s) ---
+HTTP 200   (3s elapsed)
+{"input_tokens":8417,"iterations":1,"output_tokens":27,"response":"PONG"}
+
+--- daemon log for this call (lines added during it) ---
+
+=== test-a7-inherit-hf ===
+--- manifest ---
+name = "test-a7-inherit-hf"
+version = "1.0.0"
+description = "A-7 baseline probe"
+author = "fang-tests"
+module = "builtin:chat"
+schedule = "reactive"
+priority = "Normal"
+tags = ["test-a7"]
+
+[model]
+provider = "hyperfusion"
+model = "google/gemma-4-31b-it"
+max_tokens = 256
+temperature = 0.0
+system_prompt = "You are a probe. Answer in one word."
+api_key_env = "<REDACTED>"
+base_url = "http://127.0.0.1:9/v1"
+
+[[fallback_models]]
+provider = "hyperfusion"
+model = "google/gemma-4-31b-it"
+api_key_env = "<REDACTED>"
+# base_url absent, but this provider IS [default_model].provider
+--- spawn: HTTP 201  agent_id=c5bc8b73-6677-40af-b3c1-6561b8f9accd ---
+on-disk manifest: ABSENT (registry only)
+--- POST /api/agents/c5bc8b73-6677-40af-b3c1-6561b8f9accd/message (timeout 600s) ---
+HTTP 200   (3s elapsed)
+{"input_tokens":11016,"iterations":1,"output_tokens":3,"response":"PONG"}
+
+--- daemon log for this call (lines added during it) ---
+2026-08-12T19:05:55.738351Z  WARN openfang_runtime::drivers::fallback: Fallback driver failed, trying next driver_index=0 model= error=HTTP error: error sending request for url (http://127.0.0.1:9/v1/chat/completions)
+
+==================================================================
+RESULT TABLE
+AGENT                HTTP     VERDICT
+test-a7-inherit      200      answered
+test-a7-explicit     200      answered
+test-a7-control      200      answered
+test-a7-inherit-hf   200      answered
+
+METRIC: inherit=200  explicit=200
+        control=200  inherit-hf=200
+RED baseline means: inherit != 2xx (401 in body) AND explicit == 200
+                    AND control == 200 AND inherit-hf == 200
+
+--- cleanup ---
+  cleaned test-a7-inherit (35a403b9-8db3-4970-b10b-8d5bdc43d314)
+  removed workspace /var/lib/docker/volumes/openfang-staging-data/_data/workspaces/test-a7-inherit
+  cleaned test-a7-explicit (28e7cfa3-16ca-4ad7-9be8-54a91ecdf6e6)
+  removed workspace /var/lib/docker/volumes/openfang-staging-data/_data/workspaces/test-a7-explicit
+  cleaned test-a7-control (540b4bc5-039b-49ea-b638-b21e707ed10b)
+  removed workspace /var/lib/docker/volumes/openfang-staging-data/_data/workspaces/test-a7-control
+  cleaned test-a7-inherit-hf (c5bc8b73-6677-40af-b3c1-6561b8f9accd)
+  removed workspace /var/lib/docker/volumes/openfang-staging-data/_data/workspaces/test-a7-inherit-hf
+done.

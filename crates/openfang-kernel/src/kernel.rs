@@ -2120,6 +2120,7 @@ impl OpenFangKernel {
 
         let (tx, rx) = tokio::sync::mpsc::channel::<StreamEvent>(64);
         let mut manifest = entry.manifest.clone();
+        self.apply_fallback_base_urls(&mut manifest);
 
         // Lazy backfill: create state_dir and workspace for existing agents
         // spawned before this field existed. Private state always lives under
@@ -2695,6 +2696,7 @@ impl OpenFangKernel {
 
         // Apply model routing if configured (disabled in Stable mode)
         let mut manifest = entry.manifest.clone();
+        self.apply_fallback_base_urls(&mut manifest);
 
         // Lazy backfill: create state_dir and workspace for existing agents.
         // Private state lives under ~/.openfang/workspaces/{name}/. User-facing
@@ -5559,6 +5561,33 @@ impl OpenFangKernel {
         None
     }
 
+    /// Bake the effective fallback `base_url` into a manifest copy before it is
+    /// handed to the agent loop.
+    ///
+    /// The `ModelNotFound` fallback chain inside `agent_loop` builds its own
+    /// drivers from `manifest.fallback_models` and has no access to
+    /// `[provider_urls]`, so a fallback whose address lives only in the provider
+    /// table is dropped with "has API key but no base_url configured". Resolving
+    /// once here keeps that chain in step with `resolve_driver`'s chain.
+    fn apply_fallback_base_urls(&self, manifest: &mut AgentManifest) {
+        let dm = &self.config.default_model;
+        for fb in &mut manifest.fallback_models {
+            let fb_provider = if fb.provider.is_empty() || fb.provider == "default" {
+                dm.provider.as_str()
+            } else {
+                fb.provider.as_str()
+            };
+            let resolved = effective_fallback_base_url(
+                fb.base_url.as_deref(),
+                fb_provider,
+                &dm.provider,
+                dm.base_url.as_deref(),
+                |p| self.lookup_provider_url(p),
+            );
+            fb.base_url = resolved;
+        }
+    }
+
     fn resolve_driver(&self, manifest: &AgentManifest) -> KernelResult<Arc<dyn LlmDriver>> {
         let agent_provider = &manifest.model.provider;
 
@@ -5727,11 +5756,13 @@ impl OpenFangKernel {
             let config = DriverConfig {
                 provider: fb_provider.clone(),
                 api_key: fb_api_key,
-                base_url: fb
-                    .base_url
-                    .clone()
-                    .or_else(|| dm.base_url.clone())
-                    .or_else(|| self.lookup_provider_url(&fb_provider)),
+                base_url: effective_fallback_base_url(
+                    fb.base_url.as_deref(),
+                    &fb_provider,
+                    &dm.provider,
+                    dm.base_url.as_deref(),
+                    |p| self.lookup_provider_url(p),
+                ),
                 skip_permissions: true,
                 subprocess_timeout_secs: if resolved_to_default {
                     dm.subprocess_timeout_secs
@@ -6752,6 +6783,31 @@ pub(crate) fn merge_disk_manifest_preserving_kernel_defaults(
         disk.exec_policy = entry.exec_policy.clone();
     }
     disk
+}
+
+/// Resolve the effective `base_url` for one per-agent fallback model.
+///
+/// Mirrors the primary-model rule in `resolve_driver`: `[default_model].base_url`
+/// is inherited only when the fallback targets the *same* provider. A fallback on
+/// a different provider takes its address from `[provider_urls]` / the runtime
+/// catalog, so its API key is never posted to the default provider's host —
+/// which showed up as a 500 carrying the other provider's 401 body.
+fn effective_fallback_base_url(
+    fb_base_url: Option<&str>,
+    fb_provider: &str,
+    default_provider: &str,
+    default_base_url: Option<&str>,
+    lookup_provider_url: impl Fn(&str) -> Option<String>,
+) -> Option<String> {
+    let inherited = if fb_provider == default_provider {
+        default_base_url
+    } else {
+        None
+    };
+    fb_base_url
+        .or(inherited)
+        .map(str::to_string)
+        .or_else(|| lookup_provider_url(fb_provider))
 }
 
 fn manifest_to_capabilities(manifest: &AgentManifest) -> Vec<Capability> {
@@ -7938,6 +7994,80 @@ mod tests {
     use super::*;
     use openfang_types::config::ExecPolicy;
     use std::collections::HashMap;
+
+    // ----- Manifest fallback base_url resolution -----
+
+    /// Stands in for `[provider_urls]` + the runtime model catalog.
+    fn provider_urls(provider: &str) -> Option<String> {
+        match provider {
+            "y7router" => Some("https://y7router.example/v1".to_string()),
+            "hyperfusion" => Some("https://hyperfusion.example/v1".to_string()),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn fallback_on_other_provider_uses_its_own_provider_url() {
+        // The regression: agent on hyperfusion (the [default_model] provider),
+        // manifest fallback on y7router with no base_url of its own. The y7router
+        // key must not be posted to hyperfusion's host.
+        let url = effective_fallback_base_url(
+            None,
+            "y7router",
+            "hyperfusion",
+            Some("https://hyperfusion.example/v1"),
+            provider_urls,
+        );
+        assert_eq!(url.as_deref(), Some("https://y7router.example/v1"));
+    }
+
+    #[test]
+    fn fallback_on_default_provider_inherits_default_model_base_url() {
+        // Same provider as [default_model] and the address written only there —
+        // keep inheriting it.
+        let url = effective_fallback_base_url(
+            None,
+            "hyperfusion",
+            "hyperfusion",
+            Some("https://dm-only.example/v1"),
+            |_| None,
+        );
+        assert_eq!(url.as_deref(), Some("https://dm-only.example/v1"));
+    }
+
+    #[test]
+    fn fallback_on_default_provider_without_default_base_url_uses_provider_urls() {
+        let url =
+            effective_fallback_base_url(None, "hyperfusion", "hyperfusion", None, provider_urls);
+        assert_eq!(url.as_deref(), Some("https://hyperfusion.example/v1"));
+    }
+
+    #[test]
+    fn fallback_explicit_base_url_wins() {
+        let url = effective_fallback_base_url(
+            Some("https://explicit.example/v1"),
+            "y7router",
+            "hyperfusion",
+            Some("https://hyperfusion.example/v1"),
+            provider_urls,
+        );
+        assert_eq!(url.as_deref(), Some("https://explicit.example/v1"));
+    }
+
+    #[test]
+    fn fallback_on_unlisted_other_provider_resolves_to_none() {
+        // No address anywhere for this provider: leave it unset so driver
+        // creation fails loudly, rather than silently borrowing another
+        // provider's host.
+        let url = effective_fallback_base_url(
+            None,
+            "nowhere",
+            "hyperfusion",
+            Some("https://hyperfusion.example/v1"),
+            provider_urls,
+        );
+        assert_eq!(url, None);
+    }
 
     #[test]
     fn test_manifest_to_capabilities() {

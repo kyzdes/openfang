@@ -31,6 +31,22 @@ const STARTUP_API_TIMEOUT: Duration = Duration::from_secs(10);
 /// Default Telegram Bot API base URL.
 const DEFAULT_API_URL: &str = "https://api.telegram.org";
 
+/// Strip the request URL from a `reqwest::Error` before it is logged.
+///
+/// Every Telegram Bot API call embeds the bot token directly in the URL path
+/// (`{api_base_url}/bot{token}/...`), which is how the Bot API authenticates
+/// requests — there is no header alternative. `reqwest` attaches the request
+/// URL to connection-level errors (failed connect, timeout, TLS, redirect,
+/// malformed-URI) so they're reproducible from logs, but that means a bare
+/// `{e}` on such an error prints the token in cleartext. Call this on every
+/// `reqwest::Error` coming out of `.send()` before it is displayed or
+/// propagated, so the token never reaches a log line. This does not cover
+/// decode errors from `.json()`/`.text()` — `reqwest` never attaches a URL
+/// to those in the first place.
+fn redact_reqwest_error(e: reqwest::Error) -> reqwest::Error {
+    e.without_url()
+}
+
 #[derive(Serialize)]
 struct TelegramBotCommand<'a> {
     command: &'a str,
@@ -120,7 +136,13 @@ impl TelegramAdapter {
     /// Validate the bot token by calling `getMe`.
     pub async fn validate_token(&self) -> Result<String, Box<dyn std::error::Error>> {
         let url = format!("{}/bot{}/getMe", self.api_base_url, self.token.as_str());
-        let resp: serde_json::Value = self.client.get(&url).send().await?.json().await?;
+        let resp = self
+            .client
+            .get(&url)
+            .send()
+            .await
+            .map_err(redact_reqwest_error)?;
+        let resp: serde_json::Value = resp.json().await?;
 
         if resp["ok"].as_bool() != Some(true) {
             let desc = resp["description"].as_str().unwrap_or("unknown error");
@@ -154,15 +176,15 @@ impl TelegramAdapter {
                 description: spec.desc,
             })
             .collect();
-        let resp: serde_json::Value = self
+        let resp = self
             .client
             .post(&url)
             .timeout(STARTUP_API_TIMEOUT)
             .json(&serde_json::json!({ "commands": commands }))
             .send()
-            .await?
-            .json()
-            .await?;
+            .await
+            .map_err(redact_reqwest_error)?;
+        let resp: serde_json::Value = resp.json().await?;
 
         if resp["ok"].as_bool() != Some(true) {
             let desc = resp["description"].as_str().unwrap_or("unknown error");
@@ -217,7 +239,13 @@ impl TelegramAdapter {
                 body["message_thread_id"] = serde_json::json!(tid);
             }
 
-            let resp = self.client.post(&url).json(&body).send().await?;
+            let resp = self
+                .client
+                .post(&url)
+                .json(&body)
+                .send()
+                .await
+                .map_err(redact_reqwest_error)?;
             let status = resp.status();
             if !status.is_success() {
                 let body_text = resp.text().await.unwrap_or_default();
@@ -255,7 +283,13 @@ impl TelegramAdapter {
         if let Some(tid) = thread_id {
             body["message_thread_id"] = serde_json::json!(tid);
         }
-        let resp = self.client.post(&url).json(&body).send().await?;
+        let resp = self
+            .client
+            .post(&url)
+            .json(&body)
+            .send()
+            .await
+            .map_err(redact_reqwest_error)?;
         let status = resp.status();
         if !status.is_success() {
             let body_text = resp.text().await.unwrap_or_default();
@@ -286,7 +320,13 @@ impl TelegramAdapter {
         if let Some(tid) = thread_id {
             body["message_thread_id"] = serde_json::json!(tid);
         }
-        let resp = self.client.post(&url).json(&body).send().await?;
+        let resp = self
+            .client
+            .post(&url)
+            .json(&body)
+            .send()
+            .await
+            .map_err(redact_reqwest_error)?;
         let status = resp.status();
         if !status.is_success() {
             let body_text = resp.text().await.unwrap_or_default();
@@ -326,7 +366,13 @@ impl TelegramAdapter {
             form = form.text("message_thread_id", tid.to_string());
         }
 
-        let resp = self.client.post(&url).multipart(form).send().await?;
+        let resp = self
+            .client
+            .post(&url)
+            .multipart(form)
+            .send()
+            .await
+            .map_err(redact_reqwest_error)?;
         let status = resp.status();
         if !status.is_success() {
             let body_text = resp.text().await.unwrap_or_default();
@@ -353,7 +399,13 @@ impl TelegramAdapter {
         if let Some(tid) = thread_id {
             body["message_thread_id"] = serde_json::json!(tid);
         }
-        let resp = self.client.post(&url).json(&body).send().await?;
+        let resp = self
+            .client
+            .post(&url)
+            .json(&body)
+            .send()
+            .await
+            .map_err(redact_reqwest_error)?;
         let status = resp.status();
         if !status.is_success() {
             let body_text = resp.text().await.unwrap_or_default();
@@ -384,7 +436,13 @@ impl TelegramAdapter {
         if let Some(tid) = thread_id {
             body["message_thread_id"] = serde_json::json!(tid);
         }
-        let resp = self.client.post(&url).json(&body).send().await?;
+        let resp = self
+            .client
+            .post(&url)
+            .json(&body)
+            .send()
+            .await
+            .map_err(redact_reqwest_error)?;
         let status = resp.status();
         if !status.is_success() {
             let body_text = resp.text().await.unwrap_or_default();
@@ -414,7 +472,13 @@ impl TelegramAdapter {
         if let Some(tid) = thread_id {
             body["message_thread_id"] = serde_json::json!(tid);
         }
-        let _ = self.client.post(&url).json(&body).send().await?;
+        let _ = self
+            .client
+            .post(&url)
+            .json(&body)
+            .send()
+            .await
+            .map_err(redact_reqwest_error)?;
         Ok(())
     }
 
@@ -474,7 +538,7 @@ impl TelegramAdapter {
                     }
                 }
                 Err(e) => {
-                    debug!("Telegram setMessageReaction error: {e}");
+                    debug!("Telegram setMessageReaction error: {}", redact_reqwest_error(e));
                 }
                 _ => {}
             }
@@ -596,7 +660,10 @@ impl ChannelAdapter for TelegramAdapter {
                 .await
             {
                 Ok(_) => info!("Telegram: cleared webhook, polling mode active"),
-                Err(e) => tracing::warn!("Telegram: deleteWebhook failed (non-fatal): {e}"),
+                Err(e) => tracing::warn!(
+                    "Telegram: deleteWebhook failed (non-fatal): {}",
+                    redact_reqwest_error(e)
+                ),
             }
         }
 
@@ -658,7 +725,10 @@ impl ChannelAdapter for TelegramAdapter {
                 let resp = match result {
                     Ok(resp) => resp,
                     Err(e) => {
-                        warn!("Telegram getUpdates network error: {e}, retrying in {backoff:?}");
+                        warn!(
+                            "Telegram getUpdates network error: {}, retrying in {backoff:?}",
+                            redact_reqwest_error(e)
+                        );
                         tokio::time::sleep(backoff).await;
                         backoff = (backoff * 2).min(MAX_BACKOFF);
                         continue;
@@ -1211,6 +1281,42 @@ mod tests {
 
     fn test_client() -> reqwest::Client {
         reqwest::Client::new()
+    }
+
+    /// FANG-39: `redact_reqwest_error` must strip the bot token out of a
+    /// `reqwest::Error`'s `Display` output. Connection-level errors carry
+    /// the full request URL (which embeds the token as `/bot<token>/...`);
+    /// without redaction, logging the error verbatim leaks the token.
+    ///
+    /// Uses an invalid hostname to force a `Kind::Builder` error with a URL
+    /// attached — deterministic and requires no real network I/O (mirrors
+    /// reqwest's own `execute_request_rejects_invalid_hostname` test).
+    #[tokio::test]
+    async fn test_redact_reqwest_error_strips_token_from_url() {
+        let token = "123456789:AAFakeTokenForTestingOnly-doNotUse";
+        let bad_url = format!("https://{{{{hostname}}}}/bot{token}/getUpdates");
+
+        let err = test_client()
+            .get(&bad_url)
+            .send()
+            .await
+            .expect_err("malformed hostname must fail before any network I/O");
+
+        // Sanity check: confirm the token really is present pre-redaction,
+        // otherwise this test would pass for the wrong reason.
+        assert!(
+            err.url().is_some(),
+            "test assumption broken: reqwest stopped attaching url() to builder errors"
+        );
+        assert!(format!("{err}").contains(token));
+
+        let redacted = redact_reqwest_error(err);
+        let rendered = format!("{redacted}");
+        assert!(
+            !rendered.contains(token),
+            "redacted error still leaks the bot token: {rendered}"
+        );
+        assert!(redacted.url().is_none());
     }
 
     #[tokio::test]

@@ -6037,13 +6037,16 @@ pub async fn update_agent(
                 ],
                 "PUT /api/agents/{id}/model": ["model"],
                 "PUT /api/agents/{id}/mode": ["mode"],
-                "PATCH /api/agents/{id}/identity": ["identity fields"]
+                "PATCH /api/agents/{id}/identity": ["identity fields"],
+                "PUT /api/agents/{id}/skills": ["skills"],
+                "PUT /api/agents/{id}/mcp_servers": ["mcp_servers"],
+                "PUT /api/agents/{id}/tools": ["tool_allowlist", "tool_blocklist"]
             },
             "requires_recreate": {
-                "fields": ["max_iterations", "heartbeat_interval_secs", "capabilities",
-                           "schedule", "module", "skills", "mcp_servers"],
-                "note": "/skills, /mcp_servers and /tools are read-only routes; there is \
-                         no write path for these fields.",
+                "fields": ["max_iterations", "heartbeat_interval_secs", "schedule", "module"],
+                "note": "capabilities is not writable as such: PUT /api/agents/{id}/tools \
+                         sets tool_allowlist / tool_blocklist, which gate the manifest's \
+                         capabilities rather than replacing them.",
                 "how": "DELETE /api/agents/{id} then POST /api/agents",
                 "warning": "The agent gets a new id; its session history does not follow."
             },

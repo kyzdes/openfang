@@ -157,12 +157,18 @@ To change agent settings at runtime, use one of these instead:
 | `PUT /api/agents/{id}/model` | `model` |
 | `PUT /api/agents/{id}/mode` | `mode` |
 | `PATCH /api/agents/{id}/identity` | identity fields |
+| `PUT /api/agents/{id}/skills` | `skills` |
+| `PUT /api/agents/{id}/mcp_servers` | `mcp_servers` |
+| `PUT /api/agents/{id}/tools` | `tool_allowlist`, `tool_blocklist` |
 
-`max_iterations`, `heartbeat_interval_secs`, `capabilities`, `schedule`, `module`,
-`skills` and `mcp_servers` have **no write path** at all — `/skills`, `/mcp_servers`
-and `/tools` are read-only routes. Changing those means `DELETE /api/agents/{id}`
-followed by `POST /api/agents`, which gives the agent a new id and leaves its session
-history behind.
+Only `max_iterations`, `heartbeat_interval_secs`, `schedule` and `module` have **no
+write path** at all. Changing those means `DELETE /api/agents/{id}` followed by
+`POST /api/agents`, which gives the agent a new id and leaves its session history
+behind — so check the table above first.
+
+`capabilities` is a special case: it is not writable as such, but
+`PUT /api/agents/{id}/tools` sets `tool_allowlist` / `tool_blocklist`, which gate the
+manifest's capabilities rather than replacing them. That is usually what you want.
 
 ### PUT /api/agents/{id}/mode
 

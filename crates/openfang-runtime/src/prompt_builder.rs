@@ -71,8 +71,13 @@ pub struct PromptContext {
 /// Build the complete system prompt from a `PromptContext`.
 ///
 /// Produces an ordered, multi-section prompt. Sections with no content are
-/// omitted entirely (no empty headers). Subagent mode skips sections that
+/// omitted entirely (no empty sections). Subagent mode skips sections that
 /// add unnecessary context overhead.
+///
+/// Runtime *data* sections are wrapped in XML-like tags (see [`data_section`]),
+/// never `## ` markdown headings. Behavioral *instruction* prose (tool call
+/// behavior, safety, operational guidelines, first-run, heartbeat) keeps its
+/// markdown headings on purpose — see [`data_section`] for the reasoning.
 pub fn build_system_prompt(ctx: &PromptContext) -> String {
     let mut sections: Vec<String> = Vec::with_capacity(12);
 
@@ -81,7 +86,7 @@ pub fn build_system_prompt(ctx: &PromptContext) -> String {
 
     // Section 1.5 — Current Date/Time (always present when set)
     if let Some(ref date) = ctx.current_date {
-        sections.push(format!("## Current Date\nToday is {date}."));
+        sections.push(data_section("current_date", &format!("Today is {date}.")));
     }
 
     // Section 2 — Tool Call Behavior (skip for subagents)
@@ -136,6 +141,7 @@ pub fn build_system_prompt(ctx: &PromptContext) -> String {
     }
 
     // Section 7.5 — Heartbeat checklist (only for autonomous agents)
+    // Instruction prose — keeps its markdown heading (see `data_section`).
     if !ctx.is_subagent && ctx.is_autonomous {
         if let Some(ref heartbeat) = ctx.heartbeat_md {
             if !heartbeat.trim().is_empty() {
@@ -185,6 +191,7 @@ pub fn build_system_prompt(ctx: &PromptContext) -> String {
     // to keep the system prompt stable across turns for provider prompt caching.
 
     // Section 13 — Bootstrap Protocol (only on first-run, skip for subagents)
+    // Instruction prose — keeps its markdown heading (see `data_section`).
     if !ctx.is_subagent {
         if let Some(ref bootstrap) = ctx.bootstrap_md {
             if !bootstrap.trim().is_empty() {
@@ -201,10 +208,12 @@ pub fn build_system_prompt(ctx: &PromptContext) -> String {
     }
 
     // Section 14 — Workspace Context (skip for subagents)
+    // Wrapped here rather than in `workspace_context.rs` so the closing tag
+    // survives the cap below.
     if !ctx.is_subagent {
         if let Some(ref ws_ctx) = ctx.workspace_context {
             if !ws_ctx.trim().is_empty() {
-                sections.push(cap_str(ws_ctx, 1000));
+                sections.push(data_section("workspace_context", &cap_str(ws_ctx, 1000)));
             }
         }
     }
@@ -215,9 +224,12 @@ pub fn build_system_prompt(ctx: &PromptContext) -> String {
     if let Some(ref live) = ctx.context_md {
         let trimmed = live.trim();
         if !trimmed.is_empty() {
-            sections.push(format!(
-                "## Live Context\nThe following context is refreshed from `context.md` each turn and may change between messages.\n\n{}",
-                cap_str(trimmed, 8000)
+            sections.push(data_section(
+                "live_context",
+                &format!(
+                    "The following context is refreshed from `context.md` each turn and may change between messages.\n\n{}",
+                    cap_str(trimmed, 8000)
+                ),
             ));
         }
     }
@@ -228,6 +240,25 @@ pub fn build_system_prompt(ctx: &PromptContext) -> String {
 // ---------------------------------------------------------------------------
 // Section builders
 // ---------------------------------------------------------------------------
+
+/// Wrap a runtime-data section in an XML-like tag instead of a `## ` heading.
+///
+/// An agent asked to write a markdown document treats the `## Section` blocks of
+/// its own system prompt as part of the document and copies them into the
+/// output: an AgentRAG2 report ended with a verbatim `## Current Date` block.
+/// XML-like tags are not part of the markdown the agent is producing, so they
+/// don't get echoed.
+///
+/// Applied to runtime *data* only (date, sender, channel, workspace, persona,
+/// memory, tools, skills, peers, …). Behavioral instruction prose keeps its
+/// markdown headings: heading structure is part of how strongly a model reads
+/// text as a directive, and a regression in instruction-following costs more
+/// than the leak being fixed here.
+///
+/// Only the wrapper changes — `body` reaches the model unchanged.
+fn data_section(tag: &str, body: &str) -> String {
+    format!("<{tag}>\n{}\n</{tag}>", body.trim_end())
+}
 
 fn build_identity_section(ctx: &PromptContext) -> String {
     if ctx.base_system_prompt.is_empty() {
@@ -241,6 +272,8 @@ fn build_identity_section(ctx: &PromptContext) -> String {
 }
 
 /// Static tool-call behavior directives.
+///
+/// Instruction prose — keeps its markdown heading (see [`data_section`]).
 const TOOL_CALL_BEHAVIOR: &str = "\
 ## Tool Call Behavior
 - When you need to use a tool, call it immediately. Do not narrate or explain routine tool calls.
@@ -271,7 +304,7 @@ pub fn build_tools_section(granted_tools: &[String]) -> String {
         groups.entry(cat).or_default().push((name.as_str(), hint));
     }
 
-    let mut out = String::from("## Your Tools\nYou have access to these capabilities:\n");
+    let mut out = String::from("You have access to these capabilities:\n");
     for (category, tools) in &groups {
         out.push_str(&format!("\n**{}**: ", capitalize(category)));
         let descs: Vec<String> = tools
@@ -286,7 +319,7 @@ pub fn build_tools_section(granted_tools: &[String]) -> String {
             .collect();
         out.push_str(&descs.join(", "));
     }
-    out
+    data_section("your_tools", &out)
 }
 
 /// Build canonical context as a standalone user message (instead of system prompt).
@@ -308,7 +341,7 @@ pub fn build_canonical_context_message(ctx: &PromptContext) -> Option<String> {
 ///
 /// Also used by `agent_loop.rs` to append recalled memories after DB lookup.
 pub fn build_memory_section(memories: &[(String, String)]) -> String {
-    let mut out = String::from("## Memory\n");
+    let mut out = String::new();
     if memories.is_empty() {
         out.push_str(
             "- When the user asks about something from a previous conversation, use memory_recall first.\n\
@@ -330,11 +363,11 @@ pub fn build_memory_section(memories: &[(String, String)]) -> String {
             }
         }
     }
-    out
+    data_section("memory", &out)
 }
 
 fn build_skills_section(skill_summary: &str, prompt_context: &str) -> String {
-    let mut out = String::from("## Skills\n");
+    let mut out = String::new();
     if !skill_summary.is_empty() {
         out.push_str(
             "You have installed skills. If a request matches a skill, use its tools directly.\n",
@@ -345,11 +378,11 @@ fn build_skills_section(skill_summary: &str, prompt_context: &str) -> String {
         out.push('\n');
         out.push_str(&cap_str(prompt_context, 2000));
     }
-    out
+    data_section("skills", &out)
 }
 
 fn build_mcp_section(mcp_summary: &str) -> String {
-    format!("## Connected Tool Servers (MCP)\n{}", mcp_summary.trim())
+    data_section("connected_tool_servers_mcp", mcp_summary.trim())
 }
 
 fn build_persona_section(
@@ -362,35 +395,38 @@ fn build_persona_section(
     let mut parts: Vec<String> = Vec::new();
 
     if let Some(ws) = workspace_path {
-        parts.push(format!("## Workspace\nWorkspace: {ws}"));
+        parts.push(data_section("workspace", &format!("Workspace: {ws}")));
     }
 
     // Identity file (IDENTITY.md) — personality at a glance, before SOUL.md
     if let Some(identity) = identity_md {
         if !identity.trim().is_empty() {
-            parts.push(format!("## Identity\n{}", cap_str(identity, 500)));
+            parts.push(data_section("identity", &cap_str(identity, 500)));
         }
     }
 
     if let Some(soul) = soul_md {
         if !soul.trim().is_empty() {
             let sanitized = strip_code_blocks(soul);
-            parts.push(format!(
-                "## Persona\nEmbody this identity in your tone and communication style. Be natural, not stiff or generic.\n{}",
-                cap_str(&sanitized, 1000)
+            parts.push(data_section(
+                "persona",
+                &format!(
+                    "Embody this identity in your tone and communication style. Be natural, not stiff or generic.\n{}",
+                    cap_str(&sanitized, 1000)
+                ),
             ));
         }
     }
 
     if let Some(user) = user_md {
         if !user.trim().is_empty() {
-            parts.push(format!("## User Context\n{}", cap_str(user, 500)));
+            parts.push(data_section("user_context", &cap_str(user, 500)));
         }
     }
 
     if let Some(memory) = memory_md {
         if !memory.trim().is_empty() {
-            parts.push(format!("## Long-Term Memory\n{}", cap_str(memory, 500)));
+            parts.push(data_section("long_term_memory", &cap_str(memory, 500)));
         }
     }
 
@@ -398,22 +434,21 @@ fn build_persona_section(
 }
 
 fn build_user_section(user_name: Option<&str>) -> String {
-    match user_name {
+    let body = match user_name {
         Some(name) => {
             format!(
-                "## User Profile\n\
-                 The user's name is \"{name}\". Address them by name naturally \
+                "The user's name is \"{name}\". Address them by name naturally \
                  when appropriate (greetings, farewells, etc.), but don't overuse it."
             )
         }
-        None => "## User Profile\n\
-             You don't know the user's name yet. On your FIRST reply in this conversation, \
+        None => "You don't know the user's name yet. On your FIRST reply in this conversation, \
              warmly introduce yourself by your agent name and ask what they'd like to be called. \
              Once they tell you, immediately use the `memory_store` tool with \
              key \"user_name\" and their name as the value so you remember it for future sessions. \
              Keep the introduction brief — don't let it overshadow their actual request."
             .to_string(),
-    }
+    };
+    data_section("user_profile", &body)
 }
 
 fn build_channel_section(channel: &str) -> String {
@@ -445,26 +480,28 @@ fn build_channel_section(channel: &str) -> String {
         "teams" => ("28000", "Use Teams-compatible markdown."),
         _ => ("4096", "Use markdown formatting where supported."),
     };
-    format!(
-        "## Channel\n\
-         You are responding via {channel}. Keep messages under {limit} chars.\n\
-         {hints}"
+    data_section(
+        "channel",
+        &format!(
+            "You are responding via {channel}. Keep messages under {limit} chars.\n\
+             {hints}"
+        ),
     )
 }
 
 fn build_sender_section(sender_name: Option<&str>, sender_id: Option<&str>) -> Option<String> {
-    match (sender_name, sender_id) {
-        (Some(name), Some(id)) => Some(format!("## Sender\nMessage from: {name} ({id})")),
-        (Some(name), None) => Some(format!("## Sender\nMessage from: {name}")),
-        (None, Some(id)) => Some(format!("## Sender\nMessage from: {id}")),
-        (None, None) => None,
-    }
+    let body = match (sender_name, sender_id) {
+        (Some(name), Some(id)) => format!("Message from: {name} ({id})"),
+        (Some(name), None) => format!("Message from: {name}"),
+        (None, Some(id)) => format!("Message from: {id}"),
+        (None, None) => return None,
+    };
+    Some(data_section("sender", &body))
 }
 
 fn build_peer_agents_section(self_name: &str, peers: &[(String, String, String)]) -> String {
     let mut out = String::from(
-        "## Peer Agents\n\
-         You are part of a multi-agent system. These agents are running alongside you:\n",
+        "You are part of a multi-agent system. These agents are running alongside you:\n",
     );
     for (name, state, model) in peers {
         if name == self_name {
@@ -476,10 +513,12 @@ fn build_peer_agents_section(self_name: &str, peers: &[(String, String, String)]
         "\nYou can communicate with them using `agent_send` (by name) and see all agents with `agent_list`. \
          Delegate tasks to specialized agents when appropriate.",
     );
-    out
+    data_section("peer_agents", &out)
 }
 
 /// Static safety section.
+///
+/// Instruction prose — keeps its markdown heading (see [`data_section`]).
 const SAFETY_SECTION: &str = "\
 ## Safety
 - Prioritize safety and human oversight over task completion.
@@ -489,6 +528,8 @@ const SAFETY_SECTION: &str = "\
 - When in doubt, ask the user.";
 
 /// Static operational guidelines (replaces STABILITY_GUIDELINES).
+///
+/// Instruction prose — keeps its markdown heading (see [`data_section`]).
 const OPERATIONAL_GUIDELINES: &str = "\
 ## Operational Guidelines
 - Do NOT retry a tool call with identical parameters if it failed. Try a different approach.
@@ -686,14 +727,168 @@ mod tests {
         }
     }
 
+    /// Context with every runtime-data section populated. No fixture string
+    /// contains a markdown heading, so every `## ` line in the built prompt
+    /// comes from the builder itself.
+    fn full_ctx() -> PromptContext {
+        PromptContext {
+            recalled_memories: vec![("pref".to_string(), "likes dark mode".to_string())],
+            skill_summary: "- web-search: Search the web".to_string(),
+            skill_prompt_context: "Prefer official docs.".to_string(),
+            mcp_summary: "- github: 5 tools (search, create_issue)".to_string(),
+            workspace_path: Some("/home/user/project".to_string()),
+            soul_md: Some("Speak like a laconic engineer.".to_string()),
+            user_md: Some("Runs a florist shop.".to_string()),
+            memory_md: Some("Prefers metric units.".to_string()),
+            identity_md: Some("Amber avatar, calm tone.".to_string()),
+            heartbeat_md: Some("- Check the inbox every hour.".to_string()),
+            is_autonomous: true,
+            agents_md: Some("Answer in the user's language.".to_string()),
+            bootstrap_md: Some("Introduce yourself once.".to_string()),
+            workspace_context: Some(
+                "- Project: openfang (Rust)\n<file name=\"SOUL.md\">\nBe nice\n</file>".to_string(),
+            ),
+            peer_agents: vec![(
+                "archivist".to_string(),
+                "running".to_string(),
+                "glm-5.2".to_string(),
+            )],
+            current_date: Some("Tuesday, August 11, 2026 (2026-08-11 22:29 +00:00)".to_string()),
+            sender_id: Some("79990001122".to_string()),
+            sender_name: Some("Katya".to_string()),
+            channel_type: Some("telegram".to_string()),
+            context_md: Some("BTCUSD: 67000".to_string()),
+            // user_name stays None so the first-run branch is exercised too.
+            ..basic_ctx()
+        }
+    }
+
+    /// Regression for the wild leak: an AgentRAG2 report ended with a verbatim
+    /// `## Current Date` / `Today is …` block copied out of the system prompt.
+    #[test]
+    fn test_current_date_is_data_not_a_markdown_section() {
+        let mut ctx = basic_ctx();
+        ctx.current_date = Some("Tuesday, August 11, 2026 (2026-08-11 22:29 +00:00)".to_string());
+        let prompt = build_system_prompt(&ctx);
+        assert!(!prompt.contains("## Current Date"));
+        assert!(prompt.contains(
+            "<current_date>\nToday is Tuesday, August 11, 2026 (2026-08-11 22:29 +00:00).\n</current_date>"
+        ));
+    }
+
+    #[test]
+    fn test_runtime_data_sections_are_not_markdown_headings() {
+        let prompt = build_system_prompt(&full_ctx());
+        for heading in [
+            "## Current Date",
+            "## Live Context",
+            "## Your Tools",
+            "## Memory",
+            "## Skills",
+            "## Connected Tool Servers",
+            "## Workspace",
+            "## Workspace Context",
+            "## Identity",
+            "## Persona",
+            "## User Context",
+            "## Long-Term Memory",
+            "## User Profile",
+            "## Channel",
+            "## Sender",
+            "## Peer Agents",
+        ] {
+            assert!(
+                !prompt.contains(heading),
+                "runtime data still rendered as a markdown heading: {heading}"
+            );
+        }
+        assert!(
+            !prompt.contains("### "),
+            "workspace context files still use markdown subheadings"
+        );
+        for tag in [
+            "current_date",
+            "live_context",
+            "your_tools",
+            "memory",
+            "skills",
+            "connected_tool_servers_mcp",
+            "workspace",
+            "workspace_context",
+            "identity",
+            "persona",
+            "user_context",
+            "long_term_memory",
+            "user_profile",
+            "channel",
+            "sender",
+            "peer_agents",
+        ] {
+            assert!(prompt.contains(&format!("<{tag}>")), "missing <{tag}>");
+            assert!(prompt.contains(&format!("</{tag}>")), "missing </{tag}>");
+        }
+    }
+
+    /// The reformatting must not drop anything: the same information has to
+    /// reach the model, only the wrapper changes. Without this, a patch that
+    /// simply deleted the sections would pass the test above.
+    #[test]
+    fn test_reformatted_sections_keep_their_data() {
+        let prompt = build_system_prompt(&full_ctx());
+        for needle in [
+            "Today is Tuesday, August 11, 2026 (2026-08-11 22:29 +00:00).",
+            "web_search (search the web for information)",
+            "[pref] likes dark mode",
+            "- web-search: Search the web",
+            "Prefer official docs.",
+            "- github: 5 tools (search, create_issue)",
+            "Workspace: /home/user/project",
+            "Amber avatar, calm tone.",
+            "Speak like a laconic engineer.",
+            "Runs a florist shop.",
+            "Prefers metric units.",
+            "don't know the user's name yet",
+            "You are responding via telegram. Keep messages under 4096 chars.",
+            "Message from: Katya (79990001122)",
+            "**archivist** (running) — model: glm-5.2",
+            "- Project: openfang (Rust)",
+            "BTCUSD: 67000",
+        ] {
+            assert!(
+                prompt.contains(needle),
+                "data lost from the prompt: {needle}"
+            );
+        }
+    }
+
+    /// Behavioral instruction prose deliberately keeps its markdown headings —
+    /// heading structure carries directive weight. Changing that set should be
+    /// a conscious act, so pin it.
+    #[test]
+    fn test_only_instruction_prose_keeps_markdown_headings() {
+        let prompt = build_system_prompt(&full_ctx());
+        let headings: Vec<&str> = prompt.lines().filter(|l| l.starts_with("## ")).collect();
+        assert_eq!(
+            headings,
+            vec![
+                "## Tool Call Behavior",
+                "## Heartbeat Checklist",
+                "## Safety",
+                "## Operational Guidelines",
+                "## First-Run Protocol",
+            ],
+            "markdown-heading sections changed; runtime data must use <tags> (see data_section)"
+        );
+    }
+
     #[test]
     fn test_full_prompt_has_all_sections() {
         let prompt = build_system_prompt(&basic_ctx());
         assert!(prompt.contains("You are Researcher"));
         assert!(prompt.contains("## Tool Call Behavior"));
-        assert!(prompt.contains("## Your Tools"));
-        assert!(prompt.contains("## Memory"));
-        assert!(prompt.contains("## User Profile"));
+        assert!(prompt.contains("<your_tools>"));
+        assert!(prompt.contains("<memory>"));
+        assert!(prompt.contains("<user_profile>"));
         assert!(prompt.contains("## Safety"));
         assert!(prompt.contains("## Operational Guidelines"));
     }
@@ -702,8 +897,8 @@ mod tests {
     fn test_section_ordering() {
         let prompt = build_system_prompt(&basic_ctx());
         let tool_behavior_pos = prompt.find("## Tool Call Behavior").unwrap();
-        let tools_pos = prompt.find("## Your Tools").unwrap();
-        let memory_pos = prompt.find("## Memory").unwrap();
+        let tools_pos = prompt.find("<your_tools>").unwrap();
+        let memory_pos = prompt.find("<memory>").unwrap();
         let safety_pos = prompt.find("## Safety").unwrap();
         let guidelines_pos = prompt.find("## Operational Guidelines").unwrap();
 
@@ -720,13 +915,13 @@ mod tests {
         let prompt = build_system_prompt(&ctx);
 
         assert!(!prompt.contains("## Tool Call Behavior"));
-        assert!(!prompt.contains("## User Profile"));
-        assert!(!prompt.contains("## Channel"));
+        assert!(!prompt.contains("<user_profile>"));
+        assert!(!prompt.contains("<channel>"));
         assert!(!prompt.contains("## Safety"));
         // Subagents still get tools and guidelines
-        assert!(prompt.contains("## Your Tools"));
+        assert!(prompt.contains("<your_tools>"));
         assert!(prompt.contains("## Operational Guidelines"));
-        assert!(prompt.contains("## Memory"));
+        assert!(prompt.contains("<memory>"));
     }
 
     #[test]
@@ -736,7 +931,7 @@ mod tests {
             ..Default::default()
         };
         let prompt = build_system_prompt(&ctx);
-        assert!(!prompt.contains("## Your Tools"));
+        assert!(!prompt.contains("<your_tools>"));
     }
 
     #[test]
@@ -776,7 +971,8 @@ mod tests {
     #[test]
     fn test_memory_section_empty() {
         let section = build_memory_section(&[]);
-        assert!(section.contains("## Memory"));
+        assert!(section.starts_with("<memory>\n"));
+        assert!(section.ends_with("</memory>"));
         assert!(section.contains("use memory_recall first"));
         assert!(!section.contains("Recalled memories"));
     }
@@ -820,7 +1016,7 @@ mod tests {
     fn test_skills_section_omitted_when_empty() {
         let ctx = basic_ctx();
         let prompt = build_system_prompt(&ctx);
-        assert!(!prompt.contains("## Skills"));
+        assert!(!prompt.contains("<skills>"));
     }
 
     #[test]
@@ -828,7 +1024,7 @@ mod tests {
         let mut ctx = basic_ctx();
         ctx.skill_summary = "- web-search: Search the web\n- git-expert: Git commands".to_string();
         let prompt = build_system_prompt(&ctx);
-        assert!(prompt.contains("## Skills"));
+        assert!(prompt.contains("<skills>"));
         assert!(prompt.contains("web-search"));
     }
 
@@ -836,7 +1032,7 @@ mod tests {
     fn test_mcp_section_omitted_when_empty() {
         let ctx = basic_ctx();
         let prompt = build_system_prompt(&ctx);
-        assert!(!prompt.contains("## Connected Tool Servers"));
+        assert!(!prompt.contains("<connected_tool_servers_mcp>"));
     }
 
     #[test]
@@ -844,7 +1040,7 @@ mod tests {
         let mut ctx = basic_ctx();
         ctx.mcp_summary = "- github: 5 tools (search, create_issue, ...)".to_string();
         let prompt = build_system_prompt(&ctx);
-        assert!(prompt.contains("## Connected Tool Servers (MCP)"));
+        assert!(prompt.contains("<connected_tool_servers_mcp>"));
         assert!(prompt.contains("github"));
     }
 
@@ -853,7 +1049,7 @@ mod tests {
         let mut ctx = basic_ctx();
         ctx.soul_md = Some("You are a pirate. Arr!".to_string());
         let prompt = build_system_prompt(&ctx);
-        assert!(prompt.contains("## Persona"));
+        assert!(prompt.contains("<persona>"));
         assert!(prompt.contains("pirate"));
     }
 
@@ -953,7 +1149,7 @@ mod tests {
         let mut ctx = basic_ctx();
         ctx.context_md = Some("BTCUSD: 67000\nETHUSD: 3400".to_string());
         let prompt = build_system_prompt(&ctx);
-        assert!(prompt.contains("## Live Context"));
+        assert!(prompt.contains("<live_context>"));
         assert!(prompt.contains("BTCUSD: 67000"));
         assert!(prompt.contains("ETHUSD: 3400"));
     }
@@ -963,11 +1159,11 @@ mod tests {
         let mut ctx = basic_ctx();
         ctx.context_md = None;
         let prompt = build_system_prompt(&ctx);
-        assert!(!prompt.contains("## Live Context"));
+        assert!(!prompt.contains("<live_context>"));
 
         ctx.context_md = Some("   \n\n   ".to_string());
         let prompt = build_system_prompt(&ctx);
-        assert!(!prompt.contains("## Live Context"));
+        assert!(!prompt.contains("<live_context>"));
     }
 
     #[test]
@@ -975,7 +1171,7 @@ mod tests {
         let mut ctx = basic_ctx();
         ctx.workspace_path = Some("/home/user/project".to_string());
         let prompt = build_system_prompt(&ctx);
-        assert!(prompt.contains("## Workspace"));
+        assert!(prompt.contains("<workspace>"));
         assert!(prompt.contains("/home/user/project"));
     }
 

@@ -124,11 +124,16 @@ impl WorkspaceContext {
     }
 
     /// Build a prompt context section summarizing the workspace.
+    ///
+    /// Returns the section *body* only — `prompt_builder` wraps it in a
+    /// `<workspace_context>` tag. No markdown headings here: agents writing
+    /// markdown copy `## `/`### ` blocks out of their system prompt into the
+    /// document they are producing.
     pub fn build_context_section(&mut self) -> String {
         let mut parts = Vec::new();
 
         parts.push(format!(
-            "## Workspace Context\n- Project: {} ({})",
+            "- Project: {} ({})",
             self.workspace_root
                 .file_name()
                 .map(|n| n.to_string_lossy().to_string())
@@ -150,7 +155,7 @@ impl WorkspaceContext {
                 } else {
                     content.to_string()
                 };
-                parts.push(format!("### {}\n{}", name, preview));
+                parts.push(format!("<file name=\"{}\">\n{}\n</file>", name, preview));
             }
         }
 
@@ -372,6 +377,11 @@ mod tests {
         assert!(section.contains("Git repository: yes"));
         assert!(section.contains("SOUL.md"));
         assert!(section.contains("Be nice"));
+        // No markdown headings: agents writing markdown copy them into the
+        // document they produce.
+        assert!(!section.contains("## "));
+        assert!(section.contains("<file name=\"SOUL.md\">"));
+        assert!(section.contains("</file>"));
 
         let _ = std::fs::remove_dir_all(&dir);
     }

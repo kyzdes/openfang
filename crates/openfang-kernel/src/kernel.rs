@@ -19,6 +19,7 @@ use openfang_runtime::agent_loop::{
 };
 use openfang_runtime::audit::AuditLog;
 use openfang_runtime::drivers;
+use openfang_runtime::drivers::fallback::FallbackTarget;
 use openfang_runtime::kernel_handle::{self, KernelHandle};
 use openfang_runtime::llm_driver::{
     CompletionRequest, CompletionResponse, DriverConfig, LlmDriver, LlmError, StreamEvent,
@@ -746,10 +747,18 @@ impl OpenFangKernel {
         }
 
         // Add fallback providers to the chain (with model names for cross-provider fallback)
-        let mut model_chain: Vec<(Arc<dyn LlmDriver>, String)> = Vec::new();
-        // Primary driver uses empty model name (uses the request's model field as-is)
+        let mut model_chain: Vec<FallbackTarget> = Vec::new();
+        // Primary driver uses empty model name (uses the request's model field
+        // as-is) and empty accounting name: this single driver serves every
+        // agent, so it cannot carry one static model id — "no substitution"
+        // means "the model the caller asked for served the call".
         for d in &driver_chain {
-            model_chain.push((d.clone(), String::new()));
+            model_chain.push(FallbackTarget {
+                driver: d.clone(),
+                model: String::new(),
+                model_id: String::new(),
+                provider: config.default_model.provider.clone(),
+            });
         }
         for fb in &config.fallback_providers {
             let fb_api_key = {
@@ -780,7 +789,12 @@ impl OpenFangKernel {
                         "Fallback provider configured"
                     );
                     driver_chain.push(d.clone());
-                    model_chain.push((d, strip_provider_prefix(&fb.model, &fb.provider)));
+                    model_chain.push(FallbackTarget {
+                        driver: d,
+                        model: strip_provider_prefix(&fb.model, &fb.provider),
+                        model_id: fb.model.clone(),
+                        provider: fb.provider.clone(),
+                    });
                 }
                 Err(e) => {
                     warn!(
@@ -794,7 +808,7 @@ impl OpenFangKernel {
 
         // Use the chain, or create a stub driver if everything failed
         let driver: Arc<dyn LlmDriver> = if driver_chain.len() > 1 {
-            Arc::new(openfang_runtime::drivers::fallback::FallbackDriver::with_models(model_chain))
+            Arc::new(openfang_runtime::drivers::fallback::FallbackDriver::with_targets(model_chain))
         } else if let Some(single) = driver_chain.into_iter().next() {
             single
         } else {
@@ -2393,7 +2407,7 @@ impl OpenFangKernel {
             drop(phase_cb);
 
             match result {
-                Ok(result) => {
+                Ok(mut result) => {
                     // Append new messages to canonical session for cross-channel memory
                     if session.messages.len() > messages_before {
                         let new_messages = session.messages[messages_before..].to_vec();
@@ -2419,27 +2433,10 @@ impl OpenFangKernel {
                         .scheduler
                         .record_usage(agent_id, &result.total_usage);
 
-                    // Persist usage to database (same as non-streaming path)
-                    let model = &manifest.model.model;
-                    let cost = MeteringEngine::estimate_cost_with_catalog(
-                        &kernel_clone
-                            .model_catalog
-                            .read()
-                            .unwrap_or_else(|e| e.into_inner()),
-                        model,
-                        result.total_usage.input_tokens,
-                        result.total_usage.output_tokens,
-                    );
-                    let _ = kernel_clone
-                        .metering
-                        .record(&openfang_memory::usage::UsageRecord {
-                            agent_id,
-                            model: model.clone(),
-                            input_tokens: result.total_usage.input_tokens,
-                            output_tokens: result.total_usage.output_tokens,
-                            cost_usd: cost,
-                            tool_calls: result.iterations.saturating_sub(1),
-                        });
+                    // Persist usage to database (same as non-streaming path):
+                    // one row per LLM call, each booked to the model that
+                    // actually served it.
+                    kernel_clone.record_turn_usage(agent_id, &manifest.model, &mut result);
 
                     let _ = kernel_clone
                         .registry
@@ -2564,6 +2561,9 @@ impl OpenFangKernel {
             cost_usd: None,
             silent: false,
             directives: Default::default(),
+            // WASM/Python modules make no LLM calls (and their usage is 0/0);
+            // this path never reaches the metering point either.
+            calls: Vec::new(),
         })
     }
 
@@ -2624,6 +2624,7 @@ impl OpenFangKernel {
             iterations: 1,
             silent: false,
             directives: Default::default(),
+            calls: Vec::new(),
         })
     }
 
@@ -2996,25 +2997,13 @@ impl OpenFangKernel {
             append_daily_memory_log(state_dir, &result.response);
         }
 
-        // Record usage in the metering engine (uses catalog pricing as single source of truth)
-        let model = &manifest.model.model;
-        let cost = MeteringEngine::estimate_cost_with_catalog(
-            &self.model_catalog.read().unwrap_or_else(|e| e.into_inner()),
-            model,
-            result.total_usage.input_tokens,
-            result.total_usage.output_tokens,
-        );
-        let _ = self.metering.record(&openfang_memory::usage::UsageRecord {
-            agent_id,
-            model: model.clone(),
-            input_tokens: result.total_usage.input_tokens,
-            output_tokens: result.total_usage.output_tokens,
-            cost_usd: cost,
-            tool_calls: result.iterations.saturating_sub(1),
-        });
+        // Record usage in the metering engine (uses catalog pricing as single
+        // source of truth): one row per LLM call, each booked to the model that
+        // actually served it, all sharing one turn id.
+        let mut result = result;
+        let cost = self.record_turn_usage(agent_id, &manifest.model, &mut result);
 
         // Populate cost on the result based on usage_footer mode
-        let mut result = result;
         match self.config.usage_footer {
             openfang_types::config::UsageFooterMode::Off => {
                 result.cost_usd = None;
@@ -3030,6 +3019,55 @@ impl OpenFangKernel {
         }
 
         Ok(result)
+    }
+
+    /// Book a turn's LLM calls and return the turn's total cost.
+    ///
+    /// One row and one counter bump per call, all sharing one `turn_id`. The
+    /// pricing key is the model that *served* the call — for an unsubstituted
+    /// call that is the manifest's model spelled exactly as before, so no
+    /// existing row changes its key or its price.
+    fn record_turn_usage(
+        &self,
+        agent_id: AgentId,
+        model: &ModelConfig,
+        result: &mut AgentLoopResult,
+    ) -> f64 {
+        let turn_id = uuid::Uuid::new_v4().to_string();
+
+        if result.calls.is_empty() {
+            // Safety net: unreachable today — every return path of the agent
+            // loop carries its calls, and the WASM/Python paths never reach
+            // here. Tokens must not be able to vanish if that ever changes.
+            result.calls.push(openfang_types::usage::LlmCall {
+                n: 0,
+                provider: model.provider.clone(),
+                model: model.model.clone(),
+                requested: None,
+                reason: None,
+                input_tokens: result.total_usage.input_tokens,
+                output_tokens: result.total_usage.output_tokens,
+                tool_calls: result.iterations.saturating_sub(1),
+                cost_usd: 0.0,
+            });
+        }
+
+        let catalog = self
+            .model_catalog
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        for call in result.calls.iter_mut() {
+            call.cost_usd = MeteringEngine::estimate_cost_with_catalog(
+                &catalog,
+                &call.model,
+                call.input_tokens,
+                call.output_tokens,
+            );
+            if let Err(e) = self.metering.record_call(agent_id, &turn_id, call) {
+                warn!(agent_id = %agent_id, model = %call.model, "Failed to record LLM call usage: {e}");
+            }
+        }
+        result.calls.iter().map(|c| c.cost_usd).sum()
     }
 
     /// Resolve a module path relative to the kernel's home directory.
@@ -5718,11 +5756,15 @@ impl OpenFangKernel {
         // instead of retrying the unreachable primary forever.
         //
         // Primary driver uses an empty model name so the request's `model` field
-        // (which is the agent's own model) is used as-is.
-        let mut chain: Vec<(
-            std::sync::Arc<dyn openfang_runtime::llm_driver::LlmDriver>,
-            String,
-        )> = vec![(primary.clone(), String::new())];
+        // (which is the agent's own model) is used as-is, and an empty
+        // accounting name so usage is booked under the manifest's model exactly
+        // as configured.
+        let mut chain: Vec<FallbackTarget> = vec![FallbackTarget {
+            driver: primary.clone(),
+            model: String::new(),
+            model_id: String::new(),
+            provider: manifest.model.provider.clone(),
+        }];
 
         // 2. Per-agent fallback models from the manifest.
         for fb in &manifest.fallback_models {
@@ -5771,7 +5813,13 @@ impl OpenFangKernel {
                 },
             };
             match drivers::create_driver(&config) {
-                Ok(d) => chain.push((d, strip_provider_prefix(&fb_model_name, &fb_provider))),
+                // Wire name is stripped, accounting name is the configured one.
+                Ok(d) => chain.push(FallbackTarget {
+                    driver: d,
+                    model: strip_provider_prefix(&fb_model_name, &fb_provider),
+                    model_id: fb_model_name.clone(),
+                    provider: fb_provider.clone(),
+                }),
                 Err(e) => {
                     warn!("Fallback driver '{}' failed to init: {e}", fb_provider);
                 }
@@ -5807,7 +5855,12 @@ impl OpenFangKernel {
             };
             match drivers::create_driver(&fb_config) {
                 Ok(d) => {
-                    chain.push((d, strip_provider_prefix(&fb.model, &fb.provider)));
+                    chain.push(FallbackTarget {
+                        driver: d,
+                        model: strip_provider_prefix(&fb.model, &fb.provider),
+                        model_id: fb.model.clone(),
+                        provider: fb.provider.clone(),
+                    });
                 }
                 Err(e) => {
                     warn!(
@@ -5821,7 +5874,7 @@ impl OpenFangKernel {
 
         if chain.len() > 1 {
             return Ok(Arc::new(
-                openfang_runtime::drivers::fallback::FallbackDriver::with_models(chain),
+                openfang_runtime::drivers::fallback::FallbackDriver::with_targets(chain),
             ));
         }
 

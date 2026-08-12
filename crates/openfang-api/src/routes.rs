@@ -422,6 +422,12 @@ pub async fn send_message(
                     output_tokens: result.total_usage.output_tokens,
                     iterations: result.iterations,
                     cost_usd: result.cost_usd,
+                    model_used: openfang_types::usage::last_served(&result.calls)
+                        .map(|(_, model)| model.to_string()),
+                    provider_used: openfang_types::usage::last_served(&result.calls)
+                        .map(|(provider, _)| provider.to_string()),
+                    fallback: openfang_types::usage::fallback_summary(&result.calls),
+                    calls: result.calls,
                 })),
             )
         }
@@ -577,7 +583,7 @@ pub async fn get_agent_session(
                 }
                 let msg_idx = built_messages.len();
                 // Fix up the msg_idx for tool_use entries registered with sentinel
-                for (_, (mi, _)) in tool_use_index.iter_mut() {
+                for (mi, _) in tool_use_index.values_mut() {
                     if *mi == usize::MAX {
                         *mi = msg_idx;
                     }
@@ -1490,6 +1496,27 @@ pub async fn get_agent(
         }
     };
 
+    // The agent's most recent observed LLM call, straight from the usage store:
+    // no in-memory slot to go stale, and it survives a daemon restart. `null`
+    // means "no turn has reached an LLM yet" — which is a different statement
+    // from "the configured model", so `model` below is left alone.
+    let last_call = state
+        .kernel
+        .memory
+        .usage()
+        .query_last_call(agent_id)
+        .ok()
+        .flatten()
+        .map(|c| {
+            serde_json::json!({
+                "provider": c.provider,
+                "model": c.model,
+                "requested": c.requested,
+                "at": c.at,
+                "turn_substituted": c.turn_substituted,
+            })
+        });
+
     (
         StatusCode::OK,
         Json(serde_json::json!({
@@ -1504,6 +1531,7 @@ pub async fn get_agent(
                 "provider": entry.manifest.model.provider,
                 "model": entry.manifest.model.model,
             },
+            "last_call": last_call,
             "capabilities": {
                 "tools": entry.manifest.capabilities.tools,
                 "network": entry.manifest.capabilities.network,
@@ -1607,6 +1635,29 @@ pub async fn send_message_stream(
                         .event("done")
                         .json_data(serde_json::json!({
                             "done": true,
+                            "usage": {
+                                "input_tokens": usage.input_tokens,
+                                "output_tokens": usage.output_tokens,
+                            }
+                        }))
+                        .unwrap_or_else(|_| Event::default().data("error")),
+                    // Who served the call that just ended. `done` above keeps its
+                    // exact shape — clients that only parse `done` are untouched.
+                    StreamEvent::CallReported {
+                        n,
+                        provider,
+                        model,
+                        requested,
+                        reason,
+                        usage,
+                    } => Event::default()
+                        .event("call")
+                        .json_data(serde_json::json!({
+                            "n": n,
+                            "provider": provider,
+                            "model": model,
+                            "requested": requested,
+                            "reason": reason,
                             "usage": {
                                 "input_tokens": usage.input_tokens,
                                 "output_tokens": usage.output_tokens,
@@ -3524,13 +3575,73 @@ pub async fn health_detail(State(state): State<Arc<AppState>>) -> impl IntoRespo
 // Prometheus metrics endpoint
 // ---------------------------------------------------------------------------
 
+/// Render the frozen per-agent usage gauges.
+///
+/// Split out from the handler so a test can assert the exact label set: the
+/// regress that shipped last time was a *label set* changing between scrapes,
+/// which sends a Prometheus series stale and starts a new one carrying the old
+/// one's total. Input is `(agent, configured provider, configured model,
+/// tokens, tool calls)`.
+fn render_agent_usage_metrics(out: &mut String, agents: &[(String, String, String, u64, u64)]) {
+    for (name, provider, model, tokens, tools) in agents {
+        out.push_str(&format!(
+            "openfang_tokens_total{{agent=\"{name}\",provider=\"{provider}\",model=\"{model}\"}} {tokens}\n"
+        ));
+        out.push_str(&format!(
+            "openfang_tool_calls_total{{agent=\"{name}\"}} {tools}\n"
+        ));
+    }
+}
+
+/// Render the per-call counter families.
+///
+/// `per_model` is `(agent, provider, model, calls, input tokens, output tokens)`
+/// and `substitutions` is `(agent, requested, served, calls)` — both already
+/// resolved to agent names and sorted.
+fn render_llm_call_metrics(
+    out: &mut String,
+    per_model: &[(String, String, String, u64, u64, u64)],
+    substitutions: &[(String, String, String, u64)],
+) {
+    out.push_str("# HELP openfang_llm_calls_total LLM calls served, by the provider and model that served them.\n");
+    out.push_str("# TYPE openfang_llm_calls_total counter\n");
+    for (name, provider, model, calls, _, _) in per_model {
+        out.push_str(&format!(
+            "openfang_llm_calls_total{{agent=\"{name}\",provider=\"{provider}\",model=\"{model}\"}} {calls}\n"
+        ));
+    }
+    out.push_str("# HELP openfang_llm_tokens_total Tokens by the provider and model that actually served them.\n");
+    out.push_str("# TYPE openfang_llm_tokens_total counter\n");
+    for (name, provider, model, _, input, output) in per_model {
+        out.push_str(&format!(
+            "openfang_llm_tokens_total{{agent=\"{name}\",provider=\"{provider}\",model=\"{model}\",direction=\"input\"}} {input}\n"
+        ));
+        out.push_str(&format!(
+            "openfang_llm_tokens_total{{agent=\"{name}\",provider=\"{provider}\",model=\"{model}\",direction=\"output\"}} {output}\n"
+        ));
+    }
+    out.push_str(
+        "# HELP openfang_llm_fallback_calls_total LLM calls served by a substitute model.\n",
+    );
+    out.push_str("# TYPE openfang_llm_fallback_calls_total counter\n");
+    for (name, requested, served, calls) in substitutions {
+        out.push_str(&format!(
+            "openfang_llm_fallback_calls_total{{agent=\"{name}\",requested=\"{requested}\",served=\"{served}\"}} {calls}\n"
+        ));
+    }
+}
+
 /// GET /api/metrics — Prometheus text-format metrics.
 ///
 /// Returns counters and gauges for monitoring OpenFang in production:
 /// - `openfang_agents_active` — number of active agents
 /// - `openfang_uptime_seconds` — seconds since daemon started
-/// - `openfang_tokens_total` — total tokens consumed (per agent)
+/// - `openfang_tokens_total` — total tokens consumed (per agent; labels are
+///   the agent's *configured* provider/model, value is across all models)
 /// - `openfang_tool_calls_total` — total tool calls (per agent)
+/// - `openfang_llm_calls_total` — LLM calls by the model that served them
+/// - `openfang_llm_tokens_total` — tokens by the model that served them
+/// - `openfang_llm_fallback_calls_total` — calls served by a substitute model
 /// - `openfang_panics_total` — supervisor panic count
 /// - `openfang_restarts_total` — supervisor restart count
 pub async fn prometheus_metrics(State(state): State<Arc<AppState>>) -> impl IntoResponse {
@@ -3555,24 +3666,72 @@ pub async fn prometheus_metrics(State(state): State<Arc<AppState>>) -> impl Into
     out.push_str("# TYPE openfang_agents_total gauge\n");
     out.push_str(&format!("openfang_agents_total {}\n\n", agents.len()));
 
-    // Per-agent token and tool usage
-    out.push_str("# HELP openfang_tokens_total Total tokens consumed (rolling hourly window).\n");
+    // Per-agent token and tool usage.
+    //
+    // FROZEN SERIES. The value is a per-AGENT rolling hourly total across all
+    // models, and the `provider`/`model` labels describe the agent's
+    // CONFIGURATION — not necessarily the model that served those tokens. Both
+    // statements were already true before per-call accounting existed, and both
+    // labels and value are deliberately left untouched: making the label follow
+    // the model that actually served would move an agent's tokens from one
+    // series to another turn by turn, so `sum()` would double-count during the
+    // staleness window and `increase()` would see steps out of nowhere. The
+    // per-model truth lives in the `openfang_llm_*` counters below.
+    out.push_str("# HELP openfang_tokens_total Total tokens consumed (rolling hourly window, per agent across all models). The provider/model labels describe the agent's configuration; for per-model truth use openfang_llm_tokens_total.\n");
     out.push_str("# TYPE openfang_tokens_total gauge\n");
     out.push_str("# HELP openfang_tool_calls_total Total tool calls (rolling hourly window).\n");
     out.push_str("# TYPE openfang_tool_calls_total gauge\n");
-    for agent in &agents {
-        let name = &agent.name;
-        let provider = &agent.manifest.model.provider;
-        let model = &agent.manifest.model.model;
-        if let Some((tokens, tools)) = state.kernel.scheduler.get_usage(agent.id) {
-            out.push_str(&format!(
-                "openfang_tokens_total{{agent=\"{name}\",provider=\"{provider}\",model=\"{model}\"}} {tokens}\n"
-            ));
-            out.push_str(&format!(
-                "openfang_tool_calls_total{{agent=\"{name}\"}} {tools}\n"
-            ));
-        }
-    }
+    let agent_usage: Vec<(String, String, String, u64, u64)> = agents
+        .iter()
+        .filter_map(|agent| {
+            state
+                .kernel
+                .scheduler
+                .get_usage(agent.id)
+                .map(|(tokens, tools)| {
+                    (
+                        agent.name.clone(),
+                        agent.manifest.model.provider.clone(),
+                        agent.manifest.model.model.clone(),
+                        tokens,
+                        tools,
+                    )
+                })
+        })
+        .collect();
+    render_agent_usage_metrics(&mut out, &agent_usage);
+    out.push('\n');
+
+    // Per-CALL counters: monotonic since process start, labelled with the
+    // provider and model that actually served each call.
+    let agent_name = |id: openfang_types::agent::AgentId| {
+        agents
+            .iter()
+            .find(|a| a.id == id)
+            .map(|a| a.name.clone())
+            .unwrap_or_else(|| id.to_string())
+    };
+    let mut per_model: Vec<(String, String, String, u64, u64, u64)> = state
+        .kernel
+        .metering
+        .counters
+        .snapshot_per_model()
+        .into_iter()
+        .map(|(id, provider, model, calls, input, output)| {
+            (agent_name(id), provider, model, calls, input, output)
+        })
+        .collect();
+    per_model.sort();
+    let mut substitutions: Vec<(String, String, String, u64)> = state
+        .kernel
+        .metering
+        .counters
+        .snapshot_substitutions()
+        .into_iter()
+        .map(|(id, requested, served, calls)| (agent_name(id), requested, served, calls))
+        .collect();
+    substitutions.sort();
+    render_llm_call_metrics(&mut out, &per_model, &substitutions);
     out.push('\n');
 
     // Supervisor health
@@ -5563,11 +5722,15 @@ pub async fn usage_stats(State(state): State<Arc<AppState>>) -> impl IntoRespons
 /// GET /api/usage/summary — Get overall usage summary from UsageStore.
 pub async fn usage_summary(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     match state.kernel.memory.usage().query_summary(None) {
+        // `call_count` counts LLM calls (it always claimed to) and `turn_count`
+        // counts turns — the number `call_count` used to carry when a row was
+        // one turn.
         Ok(s) => Json(serde_json::json!({
             "total_input_tokens": s.total_input_tokens,
             "total_output_tokens": s.total_output_tokens,
             "total_cost_usd": s.total_cost_usd,
             "call_count": s.call_count,
+            "turn_count": s.turn_count,
             "total_tool_calls": s.total_tool_calls,
         })),
         Err(_) => Json(serde_json::json!({
@@ -5575,6 +5738,7 @@ pub async fn usage_summary(State(state): State<Arc<AppState>>) -> impl IntoRespo
             "total_output_tokens": 0,
             "total_cost_usd": 0.0,
             "call_count": 0,
+            "turn_count": 0,
             "total_tool_calls": 0,
         })),
     }
@@ -5589,10 +5753,13 @@ pub async fn usage_by_model(State(state): State<Arc<AppState>>) -> impl IntoResp
                 .map(|m| {
                     serde_json::json!({
                         "model": m.model,
+                        "provider": m.provider,
                         "total_cost_usd": m.total_cost_usd,
                         "total_input_tokens": m.total_input_tokens,
                         "total_output_tokens": m.total_output_tokens,
                         "call_count": m.call_count,
+                        "turn_count": m.turn_count,
+                        "substitute_calls": m.substitute_calls,
                     })
                 })
                 .collect();
@@ -12994,6 +13161,138 @@ mod uninstall_agent_tests {
         assert!(
             home.join("escape").is_dir(),
             "sibling dir outside agents/ must NOT be deleted"
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Parse a Prometheus exposition body into `name{labels} -> value`.
+    fn series(text: &str) -> std::collections::HashMap<String, f64> {
+        text.lines()
+            .filter(|l| !l.starts_with('#') && !l.trim().is_empty())
+            .filter_map(|l| {
+                let (key, value) = l.rsplit_once(' ')?;
+                Some((key.to_string(), value.parse().ok()?))
+            })
+            .collect()
+    }
+
+    /// The failure that shipped last time was not a wrong number — it was a
+    /// changing LABEL SET: an agent's tokens moved from the series labelled
+    /// with one model to a series labelled with another, so the first went
+    /// stale, the second appeared carrying the first's total, and `sum()`
+    /// double-counted for the whole staleness window. This test scrapes before
+    /// and after a mixed turn and pins that nothing moves.
+    #[test]
+    fn test_metric_label_sets_are_stable_across_a_mixed_turn() {
+        let agent = "test-adv-mixed".to_string();
+        let provider = "hyperfusion".to_string();
+        let configured = "adv-primary".to_string();
+        let substitute = "adv-fallback".to_string();
+
+        // Scrape 1: one turn, served entirely by the configured model.
+        let mut before = String::new();
+        render_agent_usage_metrics(
+            &mut before,
+            &[(
+                agent.clone(),
+                provider.clone(),
+                configured.clone(),
+                336,
+                0,
+            )],
+        );
+        render_llm_call_metrics(
+            &mut before,
+            &[(
+                agent.clone(),
+                provider.clone(),
+                configured.clone(),
+                1,
+                300,
+                36,
+            )],
+            &[],
+        );
+
+        // Scrape 2: after a turn where a substitute served one of two calls.
+        let mut after = String::new();
+        render_agent_usage_metrics(
+            &mut after,
+            &[(
+                agent.clone(),
+                provider.clone(),
+                configured.clone(),
+                495,
+                0,
+            )],
+        );
+        render_llm_call_metrics(
+            &mut after,
+            &[
+                (
+                    agent.clone(),
+                    provider.clone(),
+                    substitute.clone(),
+                    1,
+                    202,
+                    22,
+                ),
+                (
+                    agent.clone(),
+                    provider.clone(),
+                    configured.clone(),
+                    2,
+                    401,
+                    47,
+                ),
+            ],
+            &[(agent.clone(), configured.clone(), substitute.clone(), 1)],
+        );
+
+        let (b, a) = (series(&before), series(&after));
+
+        for (key, value) in &b {
+            let now = a
+                .get(key)
+                .unwrap_or_else(|| panic!("series went stale: {key}"));
+            assert!(*now >= *value, "counter decreased: {key} {value} -> {now}");
+        }
+
+        // The frozen family: exactly one series for this agent, labelled from
+        // the manifest, with the same value the pre-patch code produced.
+        let frozen: Vec<&String> = a
+            .keys()
+            .filter(|k| k.starts_with("openfang_tokens_total"))
+            .collect();
+        assert_eq!(frozen.len(), 1, "the agent must not gain a second series");
+        assert_eq!(
+            frozen[0],
+            "openfang_tokens_total{agent=\"test-adv-mixed\",provider=\"hyperfusion\",model=\"adv-primary\"}"
+        );
+        assert_eq!(a[frozen[0]], 495.0);
+
+        // The per-model truth lives in the new family, where a moving model is
+        // a new series by design rather than a relabelled old one.
+        assert_eq!(
+            a["openfang_llm_tokens_total{agent=\"test-adv-mixed\",provider=\"hyperfusion\",model=\"adv-fallback\",direction=\"input\"}"],
+            202.0
+        );
+        assert_eq!(
+            a["openfang_llm_tokens_total{agent=\"test-adv-mixed\",provider=\"hyperfusion\",model=\"adv-fallback\",direction=\"output\"}"],
+            22.0
+        );
+        assert_eq!(
+            a["openfang_llm_calls_total{agent=\"test-adv-mixed\",provider=\"hyperfusion\",model=\"adv-fallback\"}"],
+            1.0
+        );
+        // And the substitution itself is alertable, which it never was before.
+        assert_eq!(
+            a["openfang_llm_fallback_calls_total{agent=\"test-adv-mixed\",requested=\"adv-primary\",served=\"adv-fallback\"}"],
+            1.0
         );
     }
 }

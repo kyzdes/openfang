@@ -1,25 +1,111 @@
 //! Metering engine — tracks LLM cost and enforces spending quotas.
 
+use dashmap::DashMap;
 use openfang_memory::usage::{ModelUsage, UsageRecord, UsageStore, UsageSummary};
 use openfang_types::agent::{AgentId, ResourceQuota};
 use openfang_types::error::{OpenFangError, OpenFangResult};
+use openfang_types::usage::LlmCall;
 use std::sync::Arc;
+
+/// Monotonic per-call counters, since process start.
+///
+/// Kept in the process rather than derived with `SELECT SUM(...)` because
+/// `cleanup_old()` prunes rows: a counter that can go *down* breaks
+/// `rate()`/`increase()`. A process restart resets these, which is the one
+/// discontinuity Prometheus already knows how to handle.
+#[derive(Default)]
+pub struct LlmCounters {
+    /// (agent, provider, model) -> (calls, input tokens, output tokens)
+    per_model: DashMap<(AgentId, String, String), (u64, u64, u64)>,
+    /// (agent, requested model, model that served) -> calls
+    substitutions: DashMap<(AgentId, String, String), u64>,
+}
+
+impl LlmCounters {
+    fn record(&self, agent_id: AgentId, call: &LlmCall) {
+        let key = (agent_id, call.provider.clone(), call.model.clone());
+        let mut entry = self.per_model.entry(key).or_insert((0, 0, 0));
+        entry.0 += 1;
+        entry.1 += call.input_tokens;
+        entry.2 += call.output_tokens;
+        drop(entry);
+
+        if let Some(requested) = &call.requested {
+            *self
+                .substitutions
+                .entry((agent_id, requested.clone(), call.model.clone()))
+                .or_insert(0) += 1;
+        }
+    }
+
+    /// Snapshot as (agent, provider, model, calls, input tokens, output tokens).
+    pub fn snapshot_per_model(&self) -> Vec<(AgentId, String, String, u64, u64, u64)> {
+        self.per_model
+            .iter()
+            .map(|e| {
+                let (agent, provider, model) = e.key();
+                let (calls, input, output) = *e.value();
+                (*agent, provider.clone(), model.clone(), calls, input, output)
+            })
+            .collect()
+    }
+
+    /// Snapshot as (agent, requested model, model that served, calls).
+    pub fn snapshot_substitutions(&self) -> Vec<(AgentId, String, String, u64)> {
+        self.substitutions
+            .iter()
+            .map(|e| {
+                let (agent, requested, served) = e.key();
+                (*agent, requested.clone(), served.clone(), *e.value())
+            })
+            .collect()
+    }
+}
 
 /// The metering engine tracks usage cost and enforces quota limits.
 pub struct MeteringEngine {
     /// Persistent usage store (SQLite-backed).
     store: Arc<UsageStore>,
+    /// Monotonic per-call counters for the metrics endpoint.
+    pub counters: LlmCounters,
 }
 
 impl MeteringEngine {
     /// Create a new metering engine with the given usage store.
     pub fn new(store: Arc<UsageStore>) -> Self {
-        Self { store }
+        Self {
+            store,
+            counters: LlmCounters::default(),
+        }
     }
 
     /// Record a usage event (persists to SQLite).
     pub fn record(&self, record: &UsageRecord) -> OpenFangResult<()> {
         self.store.record(record)
+    }
+
+    /// Record one LLM call: the database row and the counters in one call, so
+    /// the two cannot drift apart.
+    pub fn record_call(
+        &self,
+        agent_id: AgentId,
+        turn_id: &str,
+        call: &LlmCall,
+    ) -> OpenFangResult<()> {
+        self.store.record(&UsageRecord {
+            agent_id,
+            model: call.model.clone(),
+            provider: call.provider.clone(),
+            turn_id: turn_id.to_string(),
+            call_index: call.n,
+            requested_model: call.requested.clone(),
+            input_tokens: call.input_tokens,
+            output_tokens: call.output_tokens,
+            cost_usd: call.cost_usd,
+            tool_calls: call.tool_calls,
+        })?;
+        self.counters.record(agent_id, call);
+        Ok(())
     }
 
     /// Check if an agent is within its spending quotas (hourly, daily, monthly).
@@ -538,14 +624,7 @@ mod tests {
         };
 
         engine
-            .record(&UsageRecord {
-                agent_id,
-                model: "claude-haiku".to_string(),
-                input_tokens: 100,
-                output_tokens: 50,
-                cost_usd: 0.001,
-                tool_calls: 0,
-            })
+            .record(&UsageRecord::turn(agent_id, "claude-haiku", 100, 50, 0.001, 0))
             .unwrap();
 
         assert!(engine.check_quota(agent_id, &quota).is_ok());
@@ -561,14 +640,7 @@ mod tests {
         };
 
         engine
-            .record(&UsageRecord {
-                agent_id,
-                model: "claude-sonnet".to_string(),
-                input_tokens: 10000,
-                output_tokens: 5000,
-                cost_usd: 0.05,
-                tool_calls: 0,
-            })
+            .record(&UsageRecord::turn(agent_id, "claude-sonnet", 10000, 5000, 0.05, 0))
             .unwrap();
 
         let result = engine.check_quota(agent_id, &quota);
@@ -588,14 +660,7 @@ mod tests {
 
         // Even with high usage, a zero limit means no enforcement
         engine
-            .record(&UsageRecord {
-                agent_id,
-                model: "claude-opus".to_string(),
-                input_tokens: 100000,
-                output_tokens: 50000,
-                cost_usd: 100.0,
-                tool_calls: 0,
-            })
+            .record(&UsageRecord::turn(agent_id, "claude-opus", 100000, 50000, 100.0, 0))
             .unwrap();
 
         assert!(engine.check_quota(agent_id, &quota).is_ok());
@@ -798,18 +863,121 @@ mod tests {
         let agent_id = AgentId::new();
 
         engine
-            .record(&UsageRecord {
-                agent_id,
-                model: "haiku".to_string(),
-                input_tokens: 500,
-                output_tokens: 200,
-                cost_usd: 0.005,
-                tool_calls: 3,
-            })
+            .record(&UsageRecord::turn(agent_id, "haiku", 500, 200, 0.005, 3))
             .unwrap();
 
         let summary = engine.get_summary(Some(agent_id)).unwrap();
         assert_eq!(summary.call_count, 1);
         assert_eq!(summary.total_input_tokens, 500);
+    }
+
+    // ---------------------------------------------------------------------
+    // Per-call recording
+    // ---------------------------------------------------------------------
+
+    fn mixed_turn_calls() -> Vec<LlmCall> {
+        vec![
+            LlmCall {
+                n: 0,
+                provider: "hyperfusion".to_string(),
+                model: "adv-fallback".to_string(),
+                requested: Some("adv-primary".to_string()),
+                reason: Some("HTTP error: connection refused".to_string()),
+                input_tokens: 202,
+                output_tokens: 22,
+                tool_calls: 1,
+                cost_usd: 0.000268,
+            },
+            LlmCall {
+                n: 1,
+                provider: "hyperfusion".to_string(),
+                model: "adv-primary".to_string(),
+                requested: None,
+                reason: None,
+                input_tokens: 101,
+                output_tokens: 11,
+                tool_calls: 0,
+                cost_usd: 0.000134,
+            },
+        ]
+    }
+
+    #[test]
+    fn test_record_call_writes_row_and_counter_together() {
+        let engine = setup();
+        let agent_id = AgentId::new();
+        for call in mixed_turn_calls() {
+            engine.record_call(agent_id, "turn-1", &call).unwrap();
+        }
+
+        // The stored rows and the counters must tell the same story.
+        let by_model = engine.get_by_model().unwrap();
+        assert_eq!(by_model.len(), 2);
+        let mut snapshot = engine.counters.snapshot_per_model();
+        snapshot.sort_by(|a, b| a.2.cmp(&b.2));
+        assert_eq!(snapshot.len(), 2);
+        assert_eq!(
+            (snapshot[0].2.as_str(), snapshot[0].3, snapshot[0].4, snapshot[0].5),
+            ("adv-fallback", 1, 202, 22)
+        );
+        assert_eq!(
+            (snapshot[1].2.as_str(), snapshot[1].3, snapshot[1].4, snapshot[1].5),
+            ("adv-primary", 1, 101, 11)
+        );
+        for (_, provider, model, _, input, _) in &snapshot {
+            let row = by_model.iter().find(|m| &m.model == model).unwrap();
+            assert_eq!(row.total_input_tokens, *input);
+            assert_eq!(row.provider.as_deref(), Some(provider.as_str()));
+        }
+
+        let subs = engine.counters.snapshot_substitutions();
+        assert_eq!(subs.len(), 1, "one substitution is alertable");
+        assert_eq!(
+            (subs[0].1.as_str(), subs[0].2.as_str(), subs[0].3),
+            ("adv-primary", "adv-fallback", 1)
+        );
+    }
+
+    #[test]
+    fn test_counters_are_monotonic_across_turns() {
+        let engine = setup();
+        let agent_id = AgentId::new();
+        for call in mixed_turn_calls() {
+            engine.record_call(agent_id, "turn-1", &call).unwrap();
+        }
+        let before = engine.counters.snapshot_per_model();
+
+        for call in mixed_turn_calls() {
+            engine.record_call(agent_id, "turn-2", &call).unwrap();
+        }
+        let after = engine.counters.snapshot_per_model();
+
+        assert_eq!(before.len(), after.len(), "no new label sets on a repeat turn");
+        for (agent, provider, model, calls, input, output) in before {
+            let now = after
+                .iter()
+                .find(|e| e.0 == agent && e.1 == provider && e.2 == model)
+                .expect("a series must never disappear");
+            assert!(now.3 >= calls && now.4 >= input && now.5 >= output);
+        }
+        // And the second turn really did add to the same series.
+        assert!(after.iter().all(|e| e.3 == 2));
+    }
+
+    #[test]
+    fn test_per_call_costs_sum_to_the_per_turn_cost() {
+        // The old code priced the whole turn in one call. Splitting the turn
+        // must not move the number the user is billed for.
+        let calls = mixed_turn_calls();
+        let per_call: f64 = calls.iter().map(|c| c.cost_usd).sum();
+        let whole_turn = MeteringEngine::estimate_cost(
+            "unknown-model",
+            calls.iter().map(|c| c.input_tokens).sum(),
+            calls.iter().map(|c| c.output_tokens).sum(),
+        );
+        assert!(
+            (per_call - whole_turn).abs() < 1e-9,
+            "per-call {per_call} vs per-turn {whole_turn}"
+        );
     }
 }

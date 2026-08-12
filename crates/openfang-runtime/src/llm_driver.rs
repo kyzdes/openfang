@@ -107,6 +107,27 @@ impl CompletionResponse {
     }
 }
 
+/// What a driver reports about the call it just served.
+///
+/// All fields `None` means "exactly what was asked for answered" — a
+/// single-model driver has nothing to add, which is why the reporting trait
+/// methods have default bodies and no driver but [`crate::drivers::fallback`]
+/// implements them.
+///
+/// The report is a **return value**, not driver state: a single
+/// `FallbackDriver` instance is shared by concurrent turns (the kernel hands
+/// out one `default_driver`), so a mutable "last dispatch" slot would let one
+/// turn read another turn's substitution.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CallReport {
+    /// Accounting name of the substitute that served the call.
+    pub substituted: Option<String>,
+    /// Provider of the substitute.
+    pub provider: Option<String>,
+    /// How the requested model's attempt ended.
+    pub reason: Option<String>,
+}
+
 /// Events emitted during streaming LLM completion.
 #[derive(Debug, Clone)]
 pub enum StreamEvent {
@@ -127,6 +148,22 @@ pub enum StreamEvent {
     /// The entire response is complete.
     ContentComplete {
         stop_reason: StopReason,
+        usage: TokenUsage,
+    },
+    /// Who served the call that just finished. Emitted by the agent loop (it
+    /// owns the accounting name), never by a driver.
+    CallReported {
+        /// 0-based call index within the turn.
+        n: u32,
+        /// Provider that served the call.
+        provider: String,
+        /// Accounting name of the model that served the call.
+        model: String,
+        /// `Some` only on substitution: who was asked for.
+        requested: Option<String>,
+        /// `Some` only on substitution: how the requested model failed.
+        reason: Option<String>,
+        /// Tokens for this call alone.
         usage: TokenUsage,
     },
     /// Agent lifecycle phase change (for UX indicators).
@@ -168,6 +205,26 @@ pub trait LlmDriver: Send + Sync {
             })
             .await;
         Ok(response)
+    }
+
+    /// Like [`LlmDriver::complete`], but also reports who served the call.
+    ///
+    /// The default says "the requested model served it", which is true for
+    /// every single-model driver.
+    async fn complete_reported(
+        &self,
+        request: CompletionRequest,
+    ) -> Result<(CompletionResponse, CallReport), LlmError> {
+        Ok((self.complete(request).await?, CallReport::default()))
+    }
+
+    /// Like [`LlmDriver::stream`], but also reports who served the call.
+    async fn stream_reported(
+        &self,
+        request: CompletionRequest,
+        tx: tokio::sync::mpsc::Sender<StreamEvent>,
+    ) -> Result<(CompletionResponse, CallReport), LlmError> {
+        Ok((self.stream(request, tx).await?, CallReport::default()))
     }
 }
 

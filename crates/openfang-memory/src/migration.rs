@@ -5,7 +5,7 @@
 use rusqlite::Connection;
 
 /// Current schema version.
-const SCHEMA_VERSION: u32 = 8;
+const SCHEMA_VERSION: u32 = 9;
 
 /// Run all migrations to bring the database up to date.
 pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
@@ -41,6 +41,10 @@ pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
 
     if current_version < 8 {
         migrate_v8(conn)?;
+    }
+
+    if current_version < 9 {
+        migrate_v9(conn)?;
     }
 
     set_schema_version(conn, SCHEMA_VERSION)?;
@@ -328,6 +332,51 @@ fn migrate_v8(conn: &Connection) -> Result<(), rusqlite::Error> {
     Ok(())
 }
 
+/// Version 9: per-call usage grain.
+///
+/// `usage_events` used to hold one row per agent *turn*, with the model taken
+/// from the manifest regardless of which driver actually answered. A turn can
+/// switch models between iterations, so those tokens could not be split at all
+/// — the whole turn was booked to one model. These columns make the row a
+/// single LLM *call*: which provider served it, which turn it belongs to, its
+/// position in that turn, and (when a substitute answered) which model was
+/// asked for.
+fn migrate_v9(conn: &Connection) -> Result<(), rusqlite::Error> {
+    // NULL provider on legacy rows is deliberate: the manifest may have changed
+    // since, so any value we invented would be a guess presented as a fact.
+    for (column, ddl) in [
+        ("provider", "ALTER TABLE usage_events ADD COLUMN provider TEXT"),
+        ("turn_id", "ALTER TABLE usage_events ADD COLUMN turn_id TEXT"),
+        (
+            "call_index",
+            "ALTER TABLE usage_events ADD COLUMN call_index INTEGER",
+        ),
+        (
+            "requested_model",
+            "ALTER TABLE usage_events ADD COLUMN requested_model TEXT",
+        ),
+    ] {
+        if !column_exists(conn, "usage_events", column) {
+            conn.execute_batch(ddl)?;
+        }
+    }
+
+    conn.execute_batch(
+        "
+        -- A legacy row IS one turn, so this backfill invents nothing and keeps
+        -- turn_count comparable across the migration boundary.
+        UPDATE usage_events SET turn_id = id WHERE turn_id IS NULL;
+
+        CREATE INDEX IF NOT EXISTS idx_usage_model ON usage_events(model, provider);
+        CREATE INDEX IF NOT EXISTS idx_usage_turn ON usage_events(turn_id);
+
+        INSERT OR IGNORE INTO migrations (version, applied_at, description)
+        VALUES (9, datetime('now'), 'Per-call usage grain: provider, turn_id, call_index, requested_model');
+        ",
+    )?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -359,5 +408,72 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         run_migrations(&conn).unwrap();
         run_migrations(&conn).unwrap(); // Should not error
+    }
+
+    /// A v8 database with real rows must survive v9: nothing lost, nothing
+    /// invented, and `turn_id` backfilled so turn counts keep working.
+    #[test]
+    fn test_migrate_v9_preserves_legacy_usage_rows() {
+        let conn = Connection::open_in_memory().unwrap();
+        // Bring the DB up to v8 only, then plant a pre-v9 row.
+        migrate_v1(&conn).unwrap();
+        migrate_v4(&conn).unwrap();
+        conn.execute_batch(
+            "INSERT INTO usage_events (id, agent_id, timestamp, model, input_tokens,
+                                       output_tokens, cost_usd, tool_calls)
+             VALUES ('row-1', 'agent-1', '2026-01-01T00:00:00Z', 'claude-haiku',
+                     100, 50, 0.001, 2);",
+        )
+        .unwrap();
+        set_schema_version(&conn, 8).unwrap();
+
+        run_migrations(&conn).unwrap();
+
+        assert_eq!(get_schema_version(&conn), 9);
+        let (model, input, provider, turn_id, requested, call_index): (
+            String,
+            i64,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<i64>,
+        ) = conn
+            .query_row(
+                "SELECT model, input_tokens, provider, turn_id, requested_model, call_index
+                 FROM usage_events WHERE id = 'row-1'",
+                [],
+                |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(model, "claude-haiku");
+        assert_eq!(input, 100);
+        assert_eq!(provider, None, "provider must not be invented for old rows");
+        assert_eq!(
+            turn_id.as_deref(),
+            Some("row-1"),
+            "a legacy row is exactly one turn"
+        );
+        assert_eq!(requested, None);
+        assert_eq!(call_index, None);
+
+        // Re-running is a no-op, not a duplicate-column error.
+        run_migrations(&conn).unwrap();
+        let versions: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM migrations WHERE version = 9",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(versions, 1);
     }
 }

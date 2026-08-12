@@ -96,6 +96,13 @@ Returns detailed information about a single agent.
     "provider": "groq",
     "model": "llama-3.3-70b-versatile"
   },
+  "last_call": {
+    "provider": "groq",
+    "model": "llama-3.3-70b-versatile",
+    "requested": null,
+    "at": "2025-01-15T10:32:11Z",
+    "turn_substituted": false
+  },
   "capabilities": {
     "tools": ["file_read", "file_list", "web_fetch"],
     "network": []
@@ -104,6 +111,12 @@ Returns detailed information about a single agent.
   "tags": []
 }
 ```
+
+`model` is the agent's **configuration**. `last_call` is an **observation** —
+the most recent LLM call, read from the usage store (so it survives a daemon
+restart) — and is `null` until a turn actually reaches an LLM.
+`last_call.turn_substituted` is true when *any* call of that same turn was
+served by a substitute, even if the last one was not.
 
 ### POST /api/agents
 
@@ -209,11 +222,64 @@ Send a message to an agent and receive the complete response.
 ```json
 {
   "response": "Here are the files in the current directory:\n- Cargo.toml\n- README.md\n...",
-  "input_tokens": 142,
-  "output_tokens": 87,
-  "iterations": 1
+  "input_tokens": 303,
+  "output_tokens": 33,
+  "iterations": 2,
+  "cost_usd": 0.000402,
+  "model_used": "adv-primary",
+  "provider_used": "hyperfusion",
+  "fallback": {
+    "used": true,
+    "calls": 1,
+    "of": 2,
+    "requested": "adv-primary",
+    "served_by": ["adv-fallback"],
+    "reason": "HTTP error: error sending request for url (...)"
+  },
+  "calls": [
+    {
+      "n": 0,
+      "provider": "hyperfusion",
+      "model": "adv-fallback",
+      "requested": "adv-primary",
+      "reason": "HTTP error: error sending request for url (...)",
+      "input_tokens": 202,
+      "output_tokens": 22,
+      "tool_calls": 1,
+      "cost_usd": 0.000268
+    },
+    {
+      "n": 1,
+      "provider": "hyperfusion",
+      "model": "adv-primary",
+      "input_tokens": 101,
+      "output_tokens": 11,
+      "tool_calls": 0,
+      "cost_usd": 0.000134
+    }
+  ]
 }
 ```
+
+**The accounting unit is one LLM call.** `calls[]` carries one entry per call in
+order; everything else is a projection of it, so the surfaces cannot disagree:
+
+| Field | Meaning |
+|-------|---------|
+| `calls[].model` | The model that actually served that call, spelled as configured. |
+| `calls[].requested` | Present **only** when a substitute served the call: the model that was asked for. Absent means "the requested model served it". |
+| `calls[].reason` | Present only on substitution: how the requested model's attempt ended. In practice transport errors and 4xx — a 5xx is absorbed by the driver's own no-tools retry and never reaches the fallback chain. |
+| `calls[].tool_calls` | Attributed conservatively: 1 for every call but the last, so the turn total stays `iterations - 1`. |
+| `model_used` / `provider_used` | Who served the **last** call of the turn. |
+| `fallback` | Omitted when nothing was substituted. `requested` and `served_by` come from different fields of the same row, so `requested` can never appear inside `served_by`. |
+
+Invariants worth asserting in a client: `sum(calls[].input_tokens) == input_tokens`,
+same for output and `cost_usd`, and `len(calls) == iterations`.
+
+Costs are catalog estimates. A model the catalog does not know is priced at the
+default $1/$3 per million, and auto-detected models carry zero rates — the
+split is attributed to the right model, but the money itself is still an
+estimate.
 
 ### GET /api/agents/{id}/session
 
@@ -1584,23 +1650,23 @@ Get a high-level usage summary with quota information.
 
 ```json
 {
-  "today": {
-    "input_tokens": 125000,
-    "output_tokens": 87000,
-    "cost_usd": 0.42,
-    "requests": 156
-  },
-  "quota": {
-    "hourly_token_limit": 1000000,
-    "hourly_tokens_used": 45000,
-    "hourly_reset_at": "2025-01-15T11:00:00Z"
-  }
+  "total_input_tokens": 125000,
+  "total_output_tokens": 87000,
+  "total_cost_usd": 0.42,
+  "call_count": 312,
+  "turn_count": 156,
+  "total_tool_calls": 156
 }
 ```
 
+`call_count` counts LLM **calls**; `turn_count` counts **turns** (messages).
+Before per-call accounting a row was a whole turn, so `call_count` carried what
+`turn_count` carries now — on a tool-using agent it will read 2-5x higher from
+this version on. Divide cost by `turn_count` for "per message".
+
 ### GET /api/usage/by-model
 
-Get usage breakdown by model.
+Get usage breakdown by model and provider.
 
 **Response** `200 OK`:
 
@@ -1610,22 +1676,49 @@ Get usage breakdown by model.
     {
       "model": "llama-3.3-70b-versatile",
       "provider": "groq",
-      "input_tokens": 80000,
-      "output_tokens": 55000,
-      "cost_usd": 0.09,
-      "request_count": 120
+      "total_input_tokens": 80000,
+      "total_output_tokens": 55000,
+      "total_cost_usd": 0.09,
+      "call_count": 240,
+      "turn_count": 120,
+      "substitute_calls": 0
     },
     {
       "model": "gemini-2.5-flash",
-      "provider": "gemini",
-      "input_tokens": 45000,
-      "output_tokens": 32000,
-      "cost_usd": 0.33,
-      "request_count": 36
+      "provider": null,
+      "total_input_tokens": 45000,
+      "total_output_tokens": 32000,
+      "total_cost_usd": 0.33,
+      "call_count": 36,
+      "turn_count": 36,
+      "substitute_calls": 4
     }
   ]
 }
 ```
+
+Rows are grouped by `(model, provider)`. Every model that produced a token has
+a row, including one that only ever ran as a fallback — `substitute_calls` is
+how many of its calls it served in place of another model. `provider` is `null`
+for rows written before this version (the manifest may have changed since, so
+it is not guessed).
+
+### GET /api/metrics
+
+Prometheus text format. Token and call metrics come in two families with
+deliberately different meanings:
+
+| Metric | Type | Labels | Meaning |
+|--------|------|--------|---------|
+| `openfang_tokens_total` | gauge | `agent`, `provider`, `model` | Rolling **hourly** total for the agent across **all** models. The `provider`/`model` labels describe the agent's **configuration**, which is not necessarily what served those tokens. Frozen as-is for series continuity. |
+| `openfang_tool_calls_total` | gauge | `agent` | Rolling hourly tool calls. |
+| `openfang_llm_calls_total` | counter | `agent`, `provider`, `model` | Calls served, labelled by who **actually served** them. |
+| `openfang_llm_tokens_total` | counter | `agent`, `provider`, `model`, `direction` | Tokens by who actually served them; `direction` is `input` or `output`. |
+| `openfang_llm_fallback_calls_total` | counter | `agent`, `requested`, `served` | Calls a substitute served in place of the requested model — alert on this. |
+
+The `openfang_llm_*` counters are monotonic since process start and are held in
+memory rather than derived from the database, because retention pruning would
+otherwise let them go backwards and break `rate()`.
 
 ---
 
@@ -2114,6 +2207,9 @@ data: {"tool":"web_search","input":{"query":"quantum computing basics"}}
 
 event: done
 data: {"done":true,"usage":{"input_tokens":150,"output_tokens":340}}
+
+event: call
+data: {"n":0,"provider":"hyperfusion","model":"adv-fallback","requested":"adv-primary","reason":"HTTP error: ...","usage":{"input_tokens":202,"output_tokens":22}}
 ```
 
 ### SSE Event Types
@@ -2123,7 +2219,11 @@ data: {"done":true,"usage":{"input_tokens":150,"output_tokens":340}}
 | `chunk` | Text delta from the LLM. `"done": false` indicates more tokens are coming. |
 | `tool_use` | The agent is invoking a tool. Contains the tool name. |
 | `tool_result` | A tool invocation has completed. Contains the tool name and input. |
-| `done` | Final event. Contains `"done": true` and token usage statistics. |
+| `done` | One per LLM call (a turn with tool use emits several), carrying that call's token usage. |
+| `call` | Who served the call that just ended: `n`, `provider`, `model`, `usage`, plus `requested`/`reason` when a substitute answered. Emitted right after that call's `done`. |
+
+A turn is `done`/`call` pairs, one pair per LLM call. Summing `call.usage` over
+the stream gives the same totals the non-streaming response reports.
 
 ---
 
@@ -2198,9 +2298,22 @@ Send a chat completion request using the OpenAI message format.
     "prompt_tokens": 25,
     "completion_tokens": 12,
     "total_tokens": 37
+  },
+  "openfang": {
+    "model_used": "llama-3.3-70b-versatile",
+    "provider_used": "groq",
+    "calls": [{"n": 0, "provider": "groq", "model": "llama-3.3-70b-versatile",
+               "input_tokens": 25, "output_tokens": 12, "tool_calls": 0,
+               "cost_usd": 0.000031}]
   }
 }
 ```
+
+`model` stays the agent name so clients that compare it against their request
+keep working; the model that actually served the turn is disclosed in the
+`openfang` vendor extension (same shape as `/message`, plus `fallback` when a
+substitute answered). The streaming form of this endpoint does not carry it —
+the chunk schema is fixed.
 
 **Streaming** --- Set `"stream": true` for SSE:
 

@@ -8,7 +8,9 @@ use crate::context_budget::{apply_context_guard, truncate_tool_result_dynamic, C
 use crate::context_overflow::{recover_from_overflow, RecoveryStage};
 use crate::embedding::EmbeddingDriver;
 use crate::kernel_handle::KernelHandle;
-use crate::llm_driver::{CompletionRequest, DriverConfig, LlmDriver, LlmError, StreamEvent};
+use crate::llm_driver::{
+    CallReport, CompletionRequest, DriverConfig, LlmDriver, LlmError, StreamEvent,
+};
 use crate::llm_errors;
 use crate::loop_guard::{LoopGuard, LoopGuardConfig, LoopGuardVerdict};
 use crate::mcp::McpConnection;
@@ -24,6 +26,7 @@ use openfang_types::message::{
     ContentBlock, Message, MessageContent, Role, StopReason, TokenUsage,
 };
 use openfang_types::tool::{ToolCall, ToolDefinition};
+use openfang_types::usage::LlmCall;
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
@@ -259,6 +262,56 @@ pub struct AgentLoopResult {
     pub silent: bool,
     /// Reply directives extracted from the agent's response.
     pub directives: openfang_types::message::ReplyDirectives,
+    /// One entry per LLM call of this turn, in order — who served it and what
+    /// it consumed. The unit of accounting; every usage surface is a projection
+    /// of this array.
+    pub calls: Vec<LlmCall>,
+}
+
+/// Close out a turn's call log: attribute tool calls and hand the vector over.
+///
+/// Tool calls are attributed conservatively — 1 to every call but the last —
+/// so the turn total stays exactly `iterations - 1`, the number written before
+/// this grain change. A truthful per-call count (`response.tool_calls.len()`)
+/// would move `summary.total_tool_calls`, and this patch changes no shipped
+/// number.
+fn finish_calls(calls: &mut Vec<LlmCall>) -> Vec<LlmCall> {
+    let n = calls.len();
+    for (i, c) in calls.iter_mut().enumerate() {
+        c.tool_calls = u32::from(i + 1 < n);
+    }
+    std::mem::take(calls)
+}
+
+/// Build the accounting row for a finished LLM call.
+///
+/// When nothing was substituted the accounting name comes from the manifest —
+/// unstripped, exactly as written today — so existing `by-model` rows keep
+/// their key.
+fn record_call(
+    calls: &mut Vec<LlmCall>,
+    iteration: u32,
+    model: &openfang_types::agent::ModelConfig,
+    report: &CallReport,
+    usage: TokenUsage,
+) {
+    calls.push(LlmCall {
+        n: iteration,
+        provider: report
+            .provider
+            .clone()
+            .unwrap_or_else(|| model.provider.clone()),
+        model: report
+            .substituted
+            .clone()
+            .unwrap_or_else(|| model.model.clone()),
+        requested: report.substituted.as_ref().map(|_| model.model.clone()),
+        reason: report.reason.clone(),
+        input_tokens: usage.input_tokens,
+        output_tokens: usage.output_tokens,
+        tool_calls: 0,
+        cost_usd: 0.0,
+    });
 }
 
 /// Build the user-turn message, combining text with any image content blocks.
@@ -449,6 +502,8 @@ pub async fn run_agent_loop(
     }
 
     let mut total_usage = TokenUsage::default();
+    // One row per LLM call of this turn — the unit of accounting.
+    let mut calls: Vec<LlmCall> = Vec::new();
     let final_response;
     // Accumulate text from intermediate iterations (tool_use turns may include text
     // alongside tool calls — this text would otherwise be lost when the final
@@ -550,7 +605,7 @@ pub async fn run_agent_loop(
 
         // Call LLM with retry, error classification, and circuit breaker
         let provider_name = manifest.model.provider.as_str();
-        let mut response = call_with_retry(
+        let (mut response, report) = call_with_retry(
             &*driver,
             request,
             Some(provider_name),
@@ -561,6 +616,13 @@ pub async fn run_agent_loop(
 
         total_usage.input_tokens += response.usage.input_tokens;
         total_usage.output_tokens += response.usage.output_tokens;
+        record_call(
+            &mut calls,
+            iteration,
+            &manifest.model,
+            &report,
+            response.usage,
+        );
 
         // Recover tool calls output as text by models that don't use the tool_calls API field
         // (e.g. Groq/Llama, DeepSeek emit `<function=name>{json}</function>` in text)
@@ -623,6 +685,7 @@ pub async fn run_agent_loop(
                             current_thread: parsed_directives.current_thread,
                             silent: true,
                         },
+                        calls: finish_calls(&mut calls),
                     });
                 }
 
@@ -801,6 +864,7 @@ pub async fn run_agent_loop(
                     cost_usd: None,
                     silent: false,
                     directives: Default::default(),
+                    calls: finish_calls(&mut calls),
                 });
             }
             StopReason::ToolUse => {
@@ -1105,6 +1169,7 @@ pub async fn run_agent_loop(
                         cost_usd: None,
                         silent: false,
                         directives: Default::default(),
+                        calls: finish_calls(&mut calls),
                     });
                 }
                 // Model hit token limit — add partial response and continue.
@@ -1158,7 +1223,7 @@ async fn call_with_retry(
     provider: Option<&str>,
     cooldown: Option<&ProviderCooldown>,
     fallback_models: &[FallbackModel],
-) -> OpenFangResult<crate::llm_driver::CompletionResponse> {
+) -> OpenFangResult<(crate::llm_driver::CompletionResponse, CallReport)> {
     // Check circuit breaker before calling
     if let (Some(provider), Some(cooldown)) = (provider, cooldown) {
         match cooldown.check(provider) {
@@ -1180,13 +1245,13 @@ async fn call_with_retry(
     let mut last_error = None;
 
     for attempt in 0..=MAX_RETRIES {
-        match driver.complete(request.clone()).await {
-            Ok(response) => {
+        match driver.complete_reported(request.clone()).await {
+            Ok((response, report)) => {
                 // Record success with circuit breaker
                 if let (Some(provider), Some(cooldown)) = (provider, cooldown) {
                     cooldown.record_success(provider);
                 }
-                return Ok(response);
+                return Ok((response, report));
             }
             Err(LlmError::RateLimited { retry_after_ms }) => {
                 if attempt == MAX_RETRIES {
@@ -1282,7 +1347,11 @@ async fn call_with_retry(
                             }
                         };
                         let mut fb_request = request.clone();
-                        fb_request.model = fb.model.clone();
+                        // FANG-36: send the same wire name `resolve_driver`'s
+                        // chain sends. Sending `fb.model` unstripped made one
+                        // configured fallback reach the provider under two
+                        // different names depending on which failover path ran.
+                        fb_request.model = strip_provider_prefix(&fb.model, &fb.provider);
                         warn!(
                             fallback_index = fb_idx,
                             provider = %fb.provider,
@@ -1297,7 +1366,16 @@ async fn call_with_retry(
                                     model = %fb.model,
                                     "Fallback model succeeded"
                                 );
-                                return Ok(response);
+                                // Booked under the configured name, so both
+                                // failover paths produce one accounting key.
+                                return Ok((
+                                    response,
+                                    CallReport {
+                                        substituted: Some(fb.model.clone()),
+                                        provider: Some(fb.provider.clone()),
+                                        reason: Some(raw_error.clone()),
+                                    },
+                                ));
                             }
                             Err(fb_err) => {
                                 warn!(
@@ -1343,7 +1421,7 @@ async fn stream_with_retry(
     provider: Option<&str>,
     cooldown: Option<&ProviderCooldown>,
     fallback_models: &[FallbackModel],
-) -> OpenFangResult<crate::llm_driver::CompletionResponse> {
+) -> OpenFangResult<(crate::llm_driver::CompletionResponse, CallReport)> {
     // Check circuit breaker before calling
     if let (Some(provider), Some(cooldown)) = (provider, cooldown) {
         match cooldown.check(provider) {
@@ -1368,12 +1446,12 @@ async fn stream_with_retry(
     let mut last_error = None;
 
     for attempt in 0..=MAX_RETRIES {
-        match driver.stream(request.clone(), tx.clone()).await {
-            Ok(response) => {
+        match driver.stream_reported(request.clone(), tx.clone()).await {
+            Ok((response, report)) => {
                 if let (Some(provider), Some(cooldown)) = (provider, cooldown) {
                     cooldown.record_success(provider);
                 }
-                return Ok(response);
+                return Ok((response, report));
             }
             Err(LlmError::RateLimited { retry_after_ms }) => {
                 if attempt == MAX_RETRIES {
@@ -1466,7 +1544,9 @@ async fn stream_with_retry(
                             }
                         };
                         let mut fb_request = request.clone();
-                        fb_request.model = fb.model.clone();
+                        // FANG-36 (stream path): same wire name as the
+                        // `resolve_driver` chain sends.
+                        fb_request.model = strip_provider_prefix(&fb.model, &fb.provider);
                         warn!(
                             fallback_index = fb_idx,
                             provider = %fb.provider,
@@ -1481,7 +1561,14 @@ async fn stream_with_retry(
                                     model = %fb.model,
                                     "Fallback model succeeded (stream)"
                                 );
-                                return Ok(response);
+                                return Ok((
+                                    response,
+                                    CallReport {
+                                        substituted: Some(fb.model.clone()),
+                                        provider: Some(fb.provider.clone()),
+                                        reason: Some(raw_error.clone()),
+                                    },
+                                ));
                             }
                             Err(fb_err) => {
                                 warn!(
@@ -1673,6 +1760,8 @@ pub async fn run_agent_loop_streaming(
     }
 
     let mut total_usage = TokenUsage::default();
+    // One row per LLM call of this turn — the unit of accounting.
+    let mut calls: Vec<LlmCall> = Vec::new();
     let final_response;
     let mut accumulated_text = String::new();
 
@@ -1793,7 +1882,7 @@ pub async fn run_agent_loop_streaming(
 
         // Stream LLM call with retry, error classification, and circuit breaker
         let provider_name = manifest.model.provider.as_str();
-        let mut response = stream_with_retry(
+        let (mut response, report) = stream_with_retry(
             &*driver,
             request,
             stream_tx.clone(),
@@ -1805,6 +1894,29 @@ pub async fn run_agent_loop_streaming(
 
         total_usage.input_tokens += response.usage.input_tokens;
         total_usage.output_tokens += response.usage.output_tokens;
+        record_call(
+            &mut calls,
+            iteration,
+            &manifest.model,
+            &report,
+            response.usage,
+        );
+        // Disclose the call on the stream itself: the dashboard and the SSE
+        // clients build their view from stream events and never see
+        // `AgentLoopResult`. The driver already sent `ContentComplete` on this
+        // same channel, so a client sees `done` and then `call`.
+        if let Some(c) = calls.last() {
+            let _ = stream_tx
+                .send(StreamEvent::CallReported {
+                    n: c.n,
+                    provider: c.provider.clone(),
+                    model: c.model.clone(),
+                    requested: c.requested.clone(),
+                    reason: c.reason.clone(),
+                    usage: response.usage,
+                })
+                .await;
+        }
 
         // Recover tool calls output as text (streaming path)
         if matches!(
@@ -1864,6 +1976,7 @@ pub async fn run_agent_loop_streaming(
                             current_thread: parsed_directives_s.current_thread,
                             silent: true,
                         },
+                        calls: finish_calls(&mut calls),
                     });
                 }
 
@@ -2017,6 +2130,7 @@ pub async fn run_agent_loop_streaming(
                     cost_usd: None,
                     silent: false,
                     directives: Default::default(),
+                    calls: finish_calls(&mut calls),
                 });
             }
             StopReason::ToolUse => {
@@ -2326,6 +2440,7 @@ pub async fn run_agent_loop_streaming(
                         cost_usd: None,
                         silent: false,
                         directives: Default::default(),
+                        calls: finish_calls(&mut calls),
                     });
                 }
                 // Issue #1148: preserve full response content (Thinking,
@@ -5489,5 +5604,470 @@ mod tests {
         assert!(!is_silent_token("Hello, how can I help?"));
         assert!(!is_silent_token("SILENT"));
         assert!(!is_silent_token(""));
+    }
+
+    // =====================================================================
+    // Per-call accounting
+    // =====================================================================
+
+    fn usage(input: u64, output: u64) -> TokenUsage {
+        TokenUsage {
+            input_tokens: input,
+            output_tokens: output,
+        }
+    }
+
+    fn adv_model() -> openfang_types::agent::ModelConfig {
+        openfang_types::agent::ModelConfig {
+            provider: "hyperfusion".to_string(),
+            model: "adv-primary".to_string(),
+            ..Default::default()
+        }
+    }
+
+    /// The turn total must stay `iterations - 1`, which is the number written
+    /// before accounting moved to per-call rows.
+    #[test]
+    fn test_finish_calls_keeps_the_turn_tool_call_total() {
+        for iterations in [1usize, 2, 5] {
+            let mut calls: Vec<LlmCall> = Vec::new();
+            for i in 0..iterations {
+                record_call(
+                    &mut calls,
+                    i as u32,
+                    &adv_model(),
+                    &CallReport::default(),
+                    usage(10, 5),
+                );
+            }
+            let finished = finish_calls(&mut calls);
+            let total: u32 = finished.iter().map(|c| c.tool_calls).sum();
+            assert_eq!(
+                total as usize,
+                iterations - 1,
+                "turn of {iterations} iterations must report {} tool calls",
+                iterations - 1
+            );
+            assert!(calls.is_empty(), "finish_calls hands the vector over");
+        }
+    }
+
+    /// A mixed turn: the substitute served call 0, the primary came back for
+    /// call 1. Under per-turn accounting this produced "fell back from
+    /// adv-primary to adv-primary" with the substitute named nowhere.
+    #[test]
+    fn test_mixed_turn_rows_name_both_models() {
+        let mut calls: Vec<LlmCall> = Vec::new();
+        record_call(
+            &mut calls,
+            0,
+            &adv_model(),
+            &CallReport {
+                substituted: Some("adv-fallback".to_string()),
+                provider: Some("hyperfusion".to_string()),
+                reason: Some("HTTP error: connection refused".to_string()),
+            },
+            usage(202, 22),
+        );
+        record_call(
+            &mut calls,
+            1,
+            &adv_model(),
+            &CallReport::default(),
+            usage(101, 11),
+        );
+        let calls = finish_calls(&mut calls);
+
+        assert_eq!(calls[0].model, "adv-fallback");
+        assert_eq!(calls[0].requested.as_deref(), Some("adv-primary"));
+        assert_eq!(calls[0].provider, "hyperfusion");
+        assert!(calls[0].substituted());
+        assert_eq!(calls[1].model, "adv-primary");
+        assert_eq!(calls[1].requested, None, "the primary is not a substitute");
+        assert_eq!(
+            calls[1].provider, "hyperfusion",
+            "an unsubstituted call takes the manifest's provider"
+        );
+
+        let s = openfang_types::usage::fallback_summary(&calls).expect("substitution");
+        assert_eq!(s.requested, "adv-primary");
+        assert_eq!(s.served_by, vec!["adv-fallback".to_string()]);
+        assert_eq!((s.calls, s.of), (1, 2));
+        assert!(
+            !s.served_by.contains(&s.requested),
+            "the disclosure must never claim a model fell back to itself"
+        );
+    }
+
+    /// Primary down for iteration 0, back for iteration 1 — driven through the
+    /// real loop and a real `FallbackDriver`.
+    struct FlakyPrimaryDriver {
+        calls: AtomicU32,
+    }
+
+    #[async_trait]
+    impl LlmDriver for FlakyPrimaryDriver {
+        async fn complete(
+            &self,
+            request: CompletionRequest,
+        ) -> Result<CompletionResponse, LlmError> {
+            assert_eq!(request.model, "adv-primary", "wire name of the primary");
+            if self.calls.fetch_add(1, Ordering::Relaxed) == 0 {
+                return Err(LlmError::Http("primary is down".to_string()));
+            }
+            Ok(CompletionResponse {
+                content: vec![ContentBlock::Text {
+                    text: "ADV-PRIMARY-WROTE-THE-FINAL-ANSWER".to_string(),
+                    provider_metadata: None,
+                }],
+                stop_reason: StopReason::EndTurn,
+                tool_calls: vec![],
+                usage: usage(101, 11),
+            })
+        }
+    }
+
+    /// The substitute answers with a tool call, so the turn needs a second
+    /// iteration — by which time the primary is back.
+    struct ToolCallSubstituteDriver;
+
+    #[async_trait]
+    impl LlmDriver for ToolCallSubstituteDriver {
+        async fn complete(
+            &self,
+            request: CompletionRequest,
+        ) -> Result<CompletionResponse, LlmError> {
+            assert_eq!(request.model, "adv-fallback", "wire name of the substitute");
+            Ok(CompletionResponse {
+                content: vec![ContentBlock::ToolUse {
+                    id: "call_1".to_string(),
+                    name: "fake_tool".to_string(),
+                    input: serde_json::json!({"q": "x"}),
+                    provider_metadata: None,
+                }],
+                stop_reason: StopReason::ToolUse,
+                tool_calls: vec![ToolCall {
+                    id: "call_1".to_string(),
+                    name: "fake_tool".to_string(),
+                    input: serde_json::json!({"q": "x"}),
+                }],
+                usage: usage(202, 22),
+            })
+        }
+    }
+
+    fn mixed_turn_driver() -> Arc<dyn LlmDriver> {
+        use crate::drivers::fallback::{FallbackDriver, FallbackTarget};
+        Arc::new(FallbackDriver::with_targets(vec![
+            FallbackTarget {
+                driver: Arc::new(FlakyPrimaryDriver {
+                    calls: AtomicU32::new(0),
+                }),
+                model: String::new(),
+                model_id: String::new(),
+                provider: "hyperfusion".to_string(),
+            },
+            FallbackTarget {
+                driver: Arc::new(ToolCallSubstituteDriver),
+                model: "adv-fallback".to_string(),
+                model_id: "adv-fallback".to_string(),
+                provider: "hyperfusion".to_string(),
+            },
+        ]))
+    }
+
+    fn adv_manifest() -> AgentManifest {
+        AgentManifest {
+            name: "test-adv-mixed".to_string(),
+            model: openfang_types::agent::ModelConfig {
+                system_prompt: "You are a test agent.".to_string(),
+                ..adv_model()
+            },
+            ..Default::default()
+        }
+    }
+
+    async fn run_adv_turn(driver: Arc<dyn LlmDriver>) -> AgentLoopResult {
+        let memory = openfang_memory::MemorySubstrate::open_in_memory(0.01).unwrap();
+        let agent_id = openfang_types::agent::AgentId::new();
+        let mut session = openfang_memory::session::Session {
+            id: openfang_types::agent::SessionId::new(),
+            agent_id,
+            messages: Vec::new(),
+            context_window_tokens: 0,
+            label: None,
+        };
+        run_agent_loop(
+            &adv_manifest(),
+            "probe",
+            &mut session,
+            &memory,
+            driver,
+            &[],
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("the turn completes: the substitute covers the dead primary")
+    }
+
+    #[tokio::test]
+    async fn test_mixed_turn_end_to_end_splits_the_turn_between_two_models() {
+        let result = run_adv_turn(mixed_turn_driver()).await;
+
+        assert_eq!(result.iterations, 2);
+        assert_eq!(
+            result.calls.len(),
+            result.iterations as usize,
+            "one accounting row per LLM call"
+        );
+
+        assert_eq!(result.calls[0].model, "adv-fallback");
+        assert_eq!(result.calls[0].requested.as_deref(), Some("adv-primary"));
+        assert!(result.calls[0]
+            .reason
+            .as_deref()
+            .unwrap_or_default()
+            .contains("primary is down"));
+        assert_eq!(
+            (
+                result.calls[0].input_tokens,
+                result.calls[0].output_tokens,
+                result.calls[0].tool_calls
+            ),
+            (202, 22, 1)
+        );
+
+        assert_eq!(result.calls[1].model, "adv-primary");
+        assert_eq!(result.calls[1].requested, None);
+        assert_eq!(
+            (
+                result.calls[1].input_tokens,
+                result.calls[1].output_tokens,
+                result.calls[1].tool_calls
+            ),
+            (101, 11, 0)
+        );
+
+        // Token conservation: the rows must add up to the turn's own totals.
+        assert_eq!(
+            result
+                .calls
+                .iter()
+                .map(|c| c.input_tokens)
+                .sum::<u64>(),
+            result.total_usage.input_tokens
+        );
+        assert_eq!(
+            result
+                .calls
+                .iter()
+                .map(|c| c.output_tokens)
+                .sum::<u64>(),
+            result.total_usage.output_tokens
+        );
+        assert_eq!(result.total_usage.input_tokens, 303);
+        assert_eq!(result.total_usage.output_tokens, 33);
+
+        let s = openfang_types::usage::fallback_summary(&result.calls).expect("substitution");
+        assert_eq!(s.served_by, vec!["adv-fallback".to_string()]);
+        assert_eq!(s.requested, "adv-primary");
+        assert!(!s.served_by.contains(&s.requested));
+        assert_eq!(
+            openfang_types::usage::last_served(&result.calls),
+            Some(("hyperfusion", "adv-primary")),
+            "the last call was the primary's — and that is all model_used claims"
+        );
+    }
+
+    /// A retry inside `call_with_retry` is the same call, not a new one.
+    struct RateLimitOnceDriver {
+        calls: AtomicU32,
+    }
+
+    #[async_trait]
+    impl LlmDriver for RateLimitOnceDriver {
+        async fn complete(
+            &self,
+            _request: CompletionRequest,
+        ) -> Result<CompletionResponse, LlmError> {
+            if self.calls.fetch_add(1, Ordering::Relaxed) == 0 {
+                return Err(LlmError::RateLimited { retry_after_ms: 1 });
+            }
+            Ok(CompletionResponse {
+                content: vec![ContentBlock::Text {
+                    text: "answered after a retry".to_string(),
+                    provider_metadata: None,
+                }],
+                stop_reason: StopReason::EndTurn,
+                tool_calls: vec![],
+                usage: usage(50, 5),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn test_retry_does_not_add_an_accounting_row() {
+        let result = run_adv_turn(Arc::new(RateLimitOnceDriver {
+            calls: AtomicU32::new(0),
+        }))
+        .await;
+        assert_eq!(result.iterations, 1);
+        assert_eq!(result.calls.len(), 1, "the retry is the same call");
+        assert_eq!(result.calls[0].input_tokens, 50);
+        assert_eq!(
+            result.calls[0].model, "adv-primary",
+            "a single-model driver reports no substitution"
+        );
+        assert!(openfang_types::usage::fallback_summary(&result.calls).is_none());
+    }
+
+    /// Minimal OpenAI-compatible server that answers exactly one request and
+    /// reports the `model` it was asked for.
+    async fn fake_openai_once() -> (u16, tokio::sync::oneshot::Receiver<String>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf: Vec<u8> = Vec::new();
+            let mut chunk = [0u8; 4096];
+            let mut header_end: Option<usize> = None;
+            let mut content_length: Option<usize> = None;
+            loop {
+                let n = socket.read(&mut chunk).await.unwrap_or(0);
+                if n == 0 {
+                    break;
+                }
+                buf.extend_from_slice(&chunk[..n]);
+                if header_end.is_none() {
+                    if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                        header_end = Some(pos + 4);
+                        let head = String::from_utf8_lossy(&buf[..pos]).to_lowercase();
+                        for line in head.lines() {
+                            if let Some(v) = line.strip_prefix("content-length:") {
+                                content_length = v.trim().parse().ok();
+                            }
+                        }
+                    }
+                }
+                match (header_end, content_length) {
+                    (Some(h), Some(cl)) if buf.len() >= h + cl => break,
+                    _ => {}
+                }
+            }
+            let body: serde_json::Value = header_end
+                .and_then(|h| serde_json::from_slice(&buf[h..]).ok())
+                .unwrap_or(serde_json::Value::Null);
+            let asked_for = body
+                .get("model")
+                .and_then(|m| m.as_str())
+                .unwrap_or_default()
+                .to_string();
+            let payload = serde_json::json!({
+                "id": "chatcmpl-test",
+                "object": "chat.completion",
+                "created": 0,
+                "model": asked_for,
+                "choices": [{
+                    "index": 0,
+                    "message": {"role": "assistant", "content": "FALLBACK-ANSWERED"},
+                    "finish_reason": "stop"
+                }],
+                "usage": {"prompt_tokens": 7, "completion_tokens": 3, "total_tokens": 10}
+            })
+            .to_string();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                payload.len(),
+                payload
+            );
+            let _ = socket.write_all(response.as_bytes()).await;
+            let _ = socket.flush().await;
+            let _ = tx.send(asked_for);
+        });
+        (port, rx)
+    }
+
+    struct ModelNotFoundDriver;
+
+    #[async_trait]
+    impl LlmDriver for ModelNotFoundDriver {
+        async fn complete(
+            &self,
+            _request: CompletionRequest,
+        ) -> Result<CompletionResponse, LlmError> {
+            Err(LlmError::Api {
+                status: 404,
+                message: "model not found".to_string(),
+            })
+        }
+    }
+
+    /// FANG-36: one configured fallback, one wire name and one accounting name.
+    ///
+    /// The `ModelNotFound` chain used to send `fb.model` unstripped while
+    /// `resolve_driver`'s `FallbackDriver` chain sent it stripped, so the same
+    /// configured entry reached the provider as two different models and landed
+    /// in two `by-model` rows.
+    #[tokio::test]
+    async fn test_model_not_found_chain_sends_the_stripped_name_and_books_the_configured_one() {
+        let (port, asked_for) = fake_openai_once().await;
+        let fallbacks = vec![FallbackModel {
+            provider: "y7router".to_string(),
+            model: "y7router/kimi/k3".to_string(),
+            api_key_env: None,
+            base_url: Some(format!("http://127.0.0.1:{port}/v1")),
+        }];
+        let request = CompletionRequest {
+            model: "dead-primary".to_string(),
+            messages: vec![Message::user("hi")],
+            tools: vec![],
+            max_tokens: 64,
+            temperature: 0.0,
+            system: None,
+            thinking: None,
+        };
+
+        let (response, report) = tokio::time::timeout(
+            Duration::from_secs(10),
+            call_with_retry(&ModelNotFoundDriver, request, None, None, &fallbacks),
+        )
+        .await
+        .expect("the fallback answers well inside the timeout")
+        .expect("the manifest fallback covers a missing primary model");
+
+        assert_eq!(response.text(), "FALLBACK-ANSWERED");
+        let wire_name = tokio::time::timeout(Duration::from_secs(5), asked_for)
+            .await
+            .expect("the fake server reported the model")
+            .unwrap();
+        assert_eq!(
+            wire_name, "kimi/k3",
+            "the provider prefix must be stripped on the wire, exactly as the \
+             FallbackDriver chain does it"
+        );
+        assert_eq!(
+            report.substituted.as_deref(),
+            Some("y7router/kimi/k3"),
+            "accounting keeps the configured spelling, so both failover paths \
+             book one key"
+        );
+        assert_eq!(report.provider.as_deref(), Some("y7router"));
+        assert!(report.reason.is_some(), "the disclosure names the failure");
     }
 }

@@ -964,7 +964,12 @@ function chatPage() {
           var meta = (data.input_tokens || 0) + ' in / ' + (data.output_tokens || 0) + ' out';
           if (data.cost_usd != null) meta += ' | $' + data.cost_usd.toFixed(4);
           if (data.iterations) meta += ' | ' + data.iterations + ' iter';
-          if (data.fallback_model) meta += ' | fallback: ' + data.fallback_model;
+          if (data.model_used) meta += ' | ' + data.model_used;
+          // The server never sent `fallback_model`; it sends a `fallback` rollup.
+          if (data.fallback && data.fallback.served_by) {
+            meta += ' | fallback: ' + data.fallback.served_by.join(',') +
+                    ' (asked ' + data.fallback.requested + ')';
+          }
           // Use server response if non-empty, otherwise preserve accumulated streamed text
           var finalText = (data.content && data.content.trim()) ? data.content : streamedText;
           // Strip raw function-call JSON that some models leak as text

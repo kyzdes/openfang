@@ -107,7 +107,9 @@ function analyticsPage() {
     // ── Cost tab helpers ──
 
     avgCostPerMessage() {
-      var count = this.summary.call_count || 0;
+      // Per MESSAGE means per turn — call_count now counts LLM calls, and an
+      // agent with tools makes several per message.
+      var count = this.summary.turn_count || 0;
       if (count === 0) return 0;
       return (this.summary.total_cost_usd || 0) / count;
     },

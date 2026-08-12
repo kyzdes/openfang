@@ -720,6 +720,7 @@ async fn handle_text_message(
                         let mut text_buffer = String::new();
                         let mut accumulated_text = String::new();
                         let mut stream_usage: Option<openfang_types::message::TokenUsage> = None;
+                        let mut stream_calls: Vec<openfang_types::usage::LlmCall> = Vec::new();
                         let mut is_silent = false;
                         let far_future = tokio::time::Instant::now() + Duration::from_secs(86400);
                         let mut flush_deadline = far_future;
@@ -744,10 +745,36 @@ async fn handle_text_message(
                                             break;
                                         }
                                         Some(ev) => {
-                                            // Capture ContentComplete for immediate response
+                                            // Capture ContentComplete for immediate response.
+                                            // One arrives per LLM call, so accumulate: taking
+                                            // only the last one reported a multi-iteration turn
+                                            // as if it were just its final call.
                                             if let StreamEvent::ContentComplete { usage, .. } = &ev {
-                                                stream_usage = Some(*usage);
+                                                let acc = stream_usage.get_or_insert_with(
+                                                    openfang_types::message::TokenUsage::default,
+                                                );
+                                                acc.input_tokens += usage.input_tokens;
+                                                acc.output_tokens += usage.output_tokens;
                                                 // Don't forward — handled below
+                                                continue;
+                                            }
+
+                                            // Who served that call. Collected for the `response`
+                                            // event's rollup; not forwarded as its own message.
+                                            if let StreamEvent::CallReported {
+                                                n, provider, model, requested, reason, usage,
+                                            } = &ev {
+                                                stream_calls.push(openfang_types::usage::LlmCall {
+                                                    n: *n,
+                                                    provider: provider.clone(),
+                                                    model: model.clone(),
+                                                    requested: requested.clone(),
+                                                    reason: reason.clone(),
+                                                    input_tokens: usage.input_tokens,
+                                                    output_tokens: usage.output_tokens,
+                                                    tool_calls: 0,
+                                                    cost_usd: 0.0,
+                                                });
                                                 continue;
                                             }
 
@@ -827,7 +854,7 @@ async fn handle_text_message(
                             is_silent = true;
                         }
 
-                        (accumulated_text, stream_usage, is_silent)
+                        (accumulated_text, stream_usage, is_silent, stream_calls)
                     });
 
                     // Wait for the stream to finish (fast — closes as soon as
@@ -872,7 +899,7 @@ async fn handle_text_message(
 
                     // Send the response immediately from stream data
                     match stream_result {
-                        Ok((accumulated_text, stream_usage, is_silent)) => {
+                        Ok((accumulated_text, stream_usage, is_silent, stream_calls)) => {
                             // Send typing lifecycle: stop
                             let _ = send_json(
                                 sender,
@@ -923,6 +950,39 @@ async fn handle_text_message(
                                 "low"
                             };
 
+                            // Everything below the token counts is derived from
+                            // the per-call reports the loop streamed, which is
+                            // why `iterations` and `cost_usd` are now real: the
+                            // dashboard never sees `AgentLoopResult` (the kernel
+                            // task's value is dropped), so the facts have to
+                            // travel on the stream.
+                            let mut stream_calls = stream_calls;
+                            {
+                                let catalog = state
+                                    .kernel
+                                    .model_catalog
+                                    .read()
+                                    .unwrap_or_else(|e| e.into_inner());
+                                for call in stream_calls.iter_mut() {
+                                    call.cost_usd =
+                                        openfang_kernel::metering::MeteringEngine::estimate_cost_with_catalog(
+                                            &catalog,
+                                            &call.model,
+                                            call.input_tokens,
+                                            call.output_tokens,
+                                        );
+                                }
+                            }
+                            let cost_usd: Option<f64> = if stream_calls.is_empty() {
+                                None
+                            } else {
+                                Some(stream_calls.iter().map(|c| c.cost_usd).sum())
+                            };
+                            let last = openfang_types::usage::last_served(&stream_calls);
+                            let model_used = last.map(|(_, m)| m.to_string());
+                            let provider_used = last.map(|(p, _)| p.to_string());
+                            let fallback = openfang_types::usage::fallback_summary(&stream_calls);
+
                             let _ = send_json(
                                 sender,
                                 &serde_json::json!({
@@ -930,9 +990,13 @@ async fn handle_text_message(
                                     "content": content,
                                     "input_tokens": usage.input_tokens,
                                     "output_tokens": usage.output_tokens,
-                                    "iterations": 0, // Not available from stream; handle updates later if needed
-                                    "cost_usd": null,
+                                    "iterations": stream_calls.len(),
+                                    "cost_usd": cost_usd,
                                     "context_pressure": pressure,
+                                    "model_used": model_used,
+                                    "provider_used": provider_used,
+                                    "fallback": fallback,
+                                    "calls": stream_calls,
                                 }),
                             )
                             .await;

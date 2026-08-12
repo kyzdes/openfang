@@ -353,7 +353,26 @@ pub async fn chat_completions(
                         + result.total_usage.output_tokens,
                 },
             };
-            Json(serde_json::to_value(&response).unwrap_or_default()).into_response()
+            // `model` stays the agent name (clients compare it against what they
+            // asked for), so the model that actually served the turn is
+            // disclosed in a vendor extension instead of a spec field.
+            let mut body = serde_json::to_value(&response).unwrap_or_default();
+            if let Some(obj) = body.as_object_mut() {
+                let last = openfang_types::usage::last_served(&result.calls);
+                let model_used = last.map(|(_, m)| m.to_string());
+                let provider_used = last.map(|(p, _)| p.to_string());
+                let fallback = openfang_types::usage::fallback_summary(&result.calls);
+                obj.insert(
+                    "openfang".to_string(),
+                    serde_json::json!({
+                        "model_used": model_used,
+                        "provider_used": provider_used,
+                        "fallback": fallback,
+                        "calls": result.calls,
+                    }),
+                );
+            }
+            Json(body).into_response()
         }
         Err(e) => {
             warn!("OpenAI compat: agent error: {e}");

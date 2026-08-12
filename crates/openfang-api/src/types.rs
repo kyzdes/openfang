@@ -51,6 +51,10 @@ pub struct MessageRequest {
 }
 
 /// Response from sending a message.
+///
+/// `calls` is the turn's accounting record — one entry per LLM call — and
+/// `model_used`, `provider_used` and `fallback` are projections of it, so they
+/// cannot contradict each other or the token totals.
 #[derive(Debug, Serialize)]
 pub struct MessageResponse {
     pub response: String,
@@ -59,6 +63,18 @@ pub struct MessageResponse {
     pub iterations: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cost_usd: Option<f64>,
+    /// Model that served the LAST call of the turn.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_used: Option<String>,
+    /// Provider that served the last call of the turn.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider_used: Option<String>,
+    /// Present only when some call was served by a substitute.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fallback: Option<openfang_types::usage::FallbackSummary>,
+    /// One entry per LLM call, in order.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub calls: Vec<openfang_types::usage::LlmCall>,
 }
 
 /// Request to install a skill from the marketplace.
@@ -162,6 +178,84 @@ pub struct AuditAppendRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use openfang_types::usage::{fallback_summary, last_served, LlmCall};
+
+    fn call(n: u32, model: &str, requested: Option<&str>, input: u64, output: u64) -> LlmCall {
+        LlmCall {
+            n,
+            provider: "hyperfusion".to_string(),
+            model: model.to_string(),
+            requested: requested.map(str::to_string),
+            reason: requested.map(|_| "HTTP error: connection refused".to_string()),
+            input_tokens: input,
+            output_tokens: output,
+            tool_calls: u32::from(requested.is_some()),
+            cost_usd: if input == 202 { 0.000268 } else { 0.000134 },
+        }
+    }
+
+    fn message_response(calls: Vec<LlmCall>) -> serde_json::Value {
+        let body = MessageResponse {
+            response: "ADV-PRIMARY-WROTE-THE-FINAL-ANSWER".to_string(),
+            input_tokens: calls.iter().map(|c| c.input_tokens).sum(),
+            output_tokens: calls.iter().map(|c| c.output_tokens).sum(),
+            iterations: calls.len() as u32,
+            cost_usd: Some(calls.iter().map(|c| c.cost_usd).sum()),
+            model_used: last_served(&calls).map(|(_, m)| m.to_string()),
+            provider_used: last_served(&calls).map(|(p, _)| p.to_string()),
+            fallback: fallback_summary(&calls),
+            calls,
+        };
+        serde_json::to_value(&body).unwrap()
+    }
+
+    /// The response body must be internally checkable: the per-call rows have to
+    /// add up to the scalars a client already reads, or the disclosure is just
+    /// another number to distrust.
+    #[test]
+    fn message_response_calls_reconcile_with_the_scalars() {
+        let json = message_response(vec![
+            call(0, "adv-fallback", Some("adv-primary"), 202, 22),
+            call(1, "adv-primary", None, 101, 11),
+        ]);
+
+        let calls = json["calls"].as_array().unwrap();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls.len() as u64, json["iterations"].as_u64().unwrap());
+        let sum = |field: &str| -> f64 {
+            calls
+                .iter()
+                .map(|c| c[field].as_f64().unwrap_or_default())
+                .sum()
+        };
+        assert_eq!(sum("input_tokens"), json["input_tokens"].as_f64().unwrap());
+        assert_eq!(sum("output_tokens"), json["output_tokens"].as_f64().unwrap());
+        assert!((sum("cost_usd") - json["cost_usd"].as_f64().unwrap()).abs() < 1e-12);
+
+        // The substituted call names both models; the primary's call names one.
+        assert_eq!(calls[0]["model"], "adv-fallback");
+        assert_eq!(calls[0]["requested"], "adv-primary");
+        assert!(
+            calls[1].get("requested").is_none(),
+            "absent `requested` is how 'the requested model served it' is spelled"
+        );
+        assert_eq!(json["model_used"], "adv-primary");
+        assert_eq!(json["fallback"]["served_by"][0], "adv-fallback");
+        assert_eq!(json["fallback"]["requested"], "adv-primary");
+        assert_eq!(json["fallback"]["calls"], 1);
+        assert_eq!(json["fallback"]["of"], 2);
+    }
+
+    #[test]
+    fn message_response_omits_fallback_when_nothing_was_substituted() {
+        let json = message_response(vec![call(0, "adv-primary", None, 101, 11)]);
+        assert!(
+            json.get("fallback").is_none(),
+            "no substitution must be detectable from the shape, not from a flag"
+        );
+        assert_eq!(json["model_used"], "adv-primary");
+        assert_eq!(json["provider_used"], "hyperfusion");
+    }
 
     #[test]
     fn skill_install_request_defaults_back_compat() {

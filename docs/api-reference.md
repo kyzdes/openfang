@@ -128,26 +128,41 @@ Spawn a new agent from a TOML manifest.
 
 ### PUT /api/agents/{id}/update
 
-Update an agent's configuration at runtime.
+**Not implemented.** Applying a whole manifest to a running agent would need a
+kill + respawn that preserves the agent id, and that does not exist yet. The route
+still accepts a body — `{"manifest_toml": "<toml>"}`, see `AgentUpdateRequest` — and
+answers `501` without changing anything.
 
-**Request Body**:
+Earlier revisions of this page described a `{description, system_prompt, tags}` body
+here and a `200 {"status": "updated"}` response. Neither was ever true of this route:
+those fields belong to `PATCH /api/agents/{id}`, below.
 
-```json
-{
-  "description": "Updated description",
-  "system_prompt": "You are a specialized assistant.",
-  "tags": ["updated", "v2"]
-}
-```
-
-**Response** `200 OK`:
+**Response** `501 Not Implemented`:
 
 ```json
 {
-  "status": "updated",
-  "agent_id": "a1b2c3d4-..."
+  "error": "manifest_update_not_implemented",
+  "message": "Applying a whole manifest to a running agent is not implemented. Nothing was changed.",
+  "use_instead": { "...": "the writable routes listed below" },
+  "requires_recreate": { "...": "fields that only a DELETE + POST can change" }
 }
 ```
+
+To change agent settings at runtime, use one of these instead:
+
+| Route | Fields |
+|---|---|
+| `PATCH /api/agents/{id}` | `name`, `description`, `model`, `provider`, `system_prompt` |
+| `PATCH /api/agents/{id}/config` | the five above plus `emoji`, `avatar_url`, `color`, `archetype`, `vibe`, `greeting_style`, `api_key_env`, `base_url`, `fallback_models` |
+| `PUT /api/agents/{id}/model` | `model` |
+| `PUT /api/agents/{id}/mode` | `mode` |
+| `PATCH /api/agents/{id}/identity` | identity fields |
+
+`max_iterations`, `heartbeat_interval_secs`, `capabilities`, `schedule`, `module`,
+`skills` and `mcp_servers` have **no write path** at all — `/skills`, `/mcp_servers`
+and `/tools` are read-only routes. Changing those means `DELETE /api/agents/{id}`
+followed by `POST /api/agents`, which gives the agent a new id and leaves its session
+history behind.
 
 ### PUT /api/agents/{id}/mode
 
@@ -2301,7 +2316,7 @@ The `Retry-After` header indicates the window duration in seconds.
 | GET | `/api/agents` | List agents |
 | POST | `/api/agents` | Spawn agent |
 | GET | `/api/agents/{id}` | Get agent details |
-| PUT | `/api/agents/{id}/update` | Update agent config |
+| PUT | `/api/agents/{id}/update` | **501, not implemented** — see PATCH routes |
 | PUT | `/api/agents/{id}/mode` | Set agent mode (Stable/Normal) |
 | DELETE | `/api/agents/{id}` | Kill agent |
 | POST | `/api/agents/{id}/message` | Send message (blocking) |

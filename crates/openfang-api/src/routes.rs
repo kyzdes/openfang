@@ -5985,11 +5985,20 @@ pub async fn update_trigger(
 // Agent update endpoint
 // ---------------------------------------------------------------------------
 
-/// PUT /api/agents/:id — Update an agent (currently: re-set manifest fields).
+/// PUT /api/agents/:id/update — not implemented; reports where to go instead.
+///
+/// This used to parse the manifest, drop it, and answer `200 {"status":"acknowledged"}`.
+/// A success code on an operation that changes nothing is the worst failure mode
+/// available: the caller has no reason to check. One of ours read the docs, believed
+/// the parameter could not be changed, and recreated the agent through DELETE + POST,
+/// losing its id and history — while two working update routes sat next to this one.
+///
+/// So the answer is a 501 that names them, because "not implemented" without a route
+/// to the goal leaves the caller exactly where the 200 did.
 pub async fn update_agent(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
-    Json(req): Json<AgentUpdateRequest>,
+    Json(_req): Json<AgentUpdateRequest>,
 ) -> impl IntoResponse {
     let agent_id: AgentId = match id.parse() {
         Ok(id) => id,
@@ -6008,24 +6017,36 @@ pub async fn update_agent(
         );
     }
 
-    // Parse the new manifest
-    let _manifest: AgentManifest = match toml::from_str(&req.manifest_toml) {
-        Ok(m) => m,
-        Err(e) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": format!("Invalid manifest: {e}")})),
-            );
-        }
-    };
-
-    // Note: Full manifest update requires kill + respawn. For now, acknowledge receipt.
+    // The manifest is deliberately not parsed. Validating input for an operation that
+    // will not be performed only makes the refusal look like a partial success.
     (
-        StatusCode::OK,
+        StatusCode::NOT_IMPLEMENTED,
         Json(serde_json::json!({
-            "status": "acknowledged",
+            "error": "manifest_update_not_implemented",
+            "message": "Applying a whole manifest to a running agent is not implemented. \
+                        Nothing was changed.",
             "agent_id": id,
-            "note": "Full manifest update requires agent restart. Use DELETE + POST to apply.",
+            "use_instead": {
+                "PATCH /api/agents/{id}": [
+                    "name", "description", "model", "provider", "system_prompt"
+                ],
+                "PATCH /api/agents/{id}/config": [
+                    "name", "description", "system_prompt", "emoji", "avatar_url",
+                    "color", "archetype", "vibe", "greeting_style", "model", "provider",
+                    "api_key_env", "base_url", "fallback_models"
+                ],
+                "PUT /api/agents/{id}/model": ["model"],
+                "PUT /api/agents/{id}/mode": ["mode"],
+                "PATCH /api/agents/{id}/identity": ["identity fields"]
+            },
+            "requires_recreate": {
+                "fields": ["max_iterations", "heartbeat_interval_secs", "capabilities",
+                           "schedule", "module", "skills", "mcp_servers"],
+                "note": "/skills, /mcp_servers and /tools are read-only routes; there is \
+                         no write path for these fields.",
+                "how": "DELETE /api/agents/{id} then POST /api/agents",
+                "warning": "The agent gets a new id; its session history does not follow."
+            },
         })),
     )
 }

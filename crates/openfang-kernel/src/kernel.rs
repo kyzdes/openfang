@@ -547,6 +547,22 @@ fn gethostname() -> Option<String> {
     }
 }
 
+/// Outcome of attempting to apply a [`crate::config_reload::ReloadPlan`]'s
+/// hot-reloadable actions to the running kernel.
+///
+/// The split matters: `hot_actions` on the plan is only a diff — it names
+/// what *could* be hot-reloaded, not what was. This struct is the receipt.
+/// Membership in `deferred` means the action was detected but the kernel has
+/// no in-process code path for it (or the reload mode didn't allow applying
+/// at all) — a daemon restart is required for it to take effect.
+#[derive(Debug, Clone, Default)]
+struct HotApplyResult {
+    /// Actions actually applied to in-process kernel state.
+    applied: Vec<crate::config_reload::HotAction>,
+    /// Actions detected but not applied; still waiting on a restart.
+    deferred: Vec<crate::config_reload::HotAction>,
+}
+
 impl OpenFangKernel {
     /// Boot the kernel with configuration from the given path.
     pub fn boot(config_path: Option<&Path>) -> KernelResult<Self> {
@@ -4141,6 +4157,13 @@ impl OpenFangKernel {
 
     /// Reload configuration: read the config file, diff against current, and
     /// apply hot-reloadable actions. Returns the reload plan for API response.
+    ///
+    /// The returned plan's `applied_actions`/`deferred_actions` are the
+    /// authoritative record of what actually happened — `hot_actions` is
+    /// only the config diff and must not be reported to an operator as
+    /// "applied" on its own (see FANG-42: a prior version of this daemon did
+    /// exactly that and told operators a channel reload had taken effect
+    /// when it had only been queued).
     pub fn reload_config(&self) -> Result<crate::config_reload::ReloadPlan, String> {
         use crate::config_reload::{
             build_reload_plan, should_apply_hot, validate_config_for_reload,
@@ -4160,24 +4183,43 @@ impl OpenFangKernel {
         }
 
         // Build the reload plan
-        let plan = build_reload_plan(&self.config, &new_config);
+        let mut plan = build_reload_plan(&self.config, &new_config);
         plan.log_summary();
 
-        // Apply hot actions if the reload mode allows it
+        // Apply hot actions if the reload mode allows it. `applied_actions`
+        // and `deferred_actions` below are the honest record of what actually
+        // happened at runtime — `hot_actions` above is only the diff, and by
+        // itself is not proof that anything was applied (see FANG-42).
         if should_apply_hot(self.config.reload.mode, &plan) {
-            self.apply_hot_actions(&plan, &new_config);
+            let result = self.apply_hot_actions(&plan, &new_config);
+            plan.applied_actions = result.applied;
+            plan.deferred_actions = result.deferred;
+        } else if !plan.hot_actions.is_empty() {
+            // Reload mode is Off/Restart: apply_hot_actions was never called,
+            // so nothing was applied — every hot-reloadable action detected
+            // in the diff is deferred until a restart (or a mode change).
+            plan.deferred_actions = plan.hot_actions.clone();
         }
+        plan.log_apply_outcome();
 
         Ok(plan)
     }
 
     /// Apply hot-reload actions to the running kernel.
+    ///
+    /// Returns which actions were actually applied to in-process state vs.
+    /// which were only detected — matched a config diff — but have no
+    /// in-process apply path yet and therefore still need a daemon restart.
+    /// Callers must not report `plan.hot_actions` as "applied" without
+    /// consulting this split (see FANG-42).
     fn apply_hot_actions(
         &self,
         plan: &crate::config_reload::ReloadPlan,
         new_config: &openfang_types::config::KernelConfig,
-    ) {
+    ) -> HotApplyResult {
         use crate::config_reload::HotAction;
+
+        let mut result = HotApplyResult::default();
 
         for action in &plan.hot_actions {
             match action {
@@ -4185,6 +4227,7 @@ impl OpenFangKernel {
                     info!("Hot-reload: updating approval policy");
                     self.approval_manager
                         .update_policy(new_config.approval.clone());
+                    result.applied.push(action.clone());
                 }
                 HotAction::UpdateCronConfig => {
                     info!(
@@ -4193,6 +4236,7 @@ impl OpenFangKernel {
                     );
                     self.cron_scheduler
                         .set_max_total_jobs(new_config.max_cron_jobs);
+                    result.applied.push(action.clone());
                 }
                 HotAction::ReloadProviderUrls => {
                     info!("Hot-reload: applying provider URL overrides");
@@ -4201,6 +4245,7 @@ impl OpenFangKernel {
                         .write()
                         .unwrap_or_else(|e| e.into_inner());
                     catalog.apply_url_overrides(&new_config.provider_urls);
+                    result.applied.push(action.clone());
                 }
                 HotAction::UpdateDefaultModel => {
                     info!(
@@ -4214,6 +4259,7 @@ impl OpenFangKernel {
                         .write()
                         .unwrap_or_else(|e: std::sync::PoisonError<_>| e.into_inner());
                     *guard = Some(new_config.default_model.clone());
+                    result.applied.push(action.clone());
                 }
                 HotAction::ReloadFallbackProviders => {
                     info!(
@@ -4231,18 +4277,26 @@ impl OpenFangKernel {
                         .write()
                         .unwrap_or_else(|e: std::sync::PoisonError<_>| e.into_inner());
                     *guard = Some(new_config.fallback_providers.clone());
+                    result.applied.push(action.clone());
                 }
                 _ => {
-                    // Other hot actions (channels, web, browser, extensions, etc.)
-                    // are logged but not applied here — they require subsystem-specific
-                    // reinitialization that should be added as those systems mature.
+                    // Other hot actions (channels, skills, web, browser,
+                    // webhook config, extensions, MCP servers, A2A, usage
+                    // footer, ...) are detected by the diff but this kernel
+                    // build has no subsystem-specific reinitialization code
+                    // for them yet — do NOT claim they were applied. They
+                    // require a daemon restart to take effect until that
+                    // work lands (tracked separately, e.g. FANG-40 for
+                    // ReloadChannels: ChannelAdapter::stop() isn't wired).
                     info!(
-                        "Hot-reload: action {:?} noted but not yet auto-applied",
+                        "Hot-reload: action {:?} noted but not yet auto-applied — restart required for it to take effect",
                         action
                     );
+                    result.deferred.push(action.clone());
                 }
             }
         }
+        result
     }
 
     /// Publish an event to the bus and evaluate triggers.
@@ -9178,6 +9232,130 @@ mod tests {
             assert_eq!(slot[0].provider, "codex");
             assert_eq!(slot[0].subprocess_timeout_secs, Some(600));
         }
+
+        kernel.shutdown();
+    }
+
+    // ----------------------------------------------------------------------
+    // FANG-42: hot-reload must not report a merely-detected action as
+    // "applied". `apply_hot_actions` must split its output into what it
+    // actually mutated in-process (`applied`) vs. what it only matched in
+    // the diff but has no in-process apply path for (`deferred`) — a prior
+    // version collapsed both into `plan.hot_actions` and callers reported
+    // that whole list as "applied", including e.g. `ReloadChannels`, which
+    // silently did nothing.
+    // ----------------------------------------------------------------------
+
+    #[test]
+    fn test_apply_hot_actions_splits_applied_from_deferred() {
+        use crate::config_reload::{build_reload_plan, HotAction};
+        use openfang_types::config::TelegramConfig;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let home_dir = tmp.path().join("openfang-fang42-split");
+        std::fs::create_dir_all(&home_dir).unwrap();
+
+        let config = KernelConfig {
+            home_dir: home_dir.clone(),
+            data_dir: home_dir.join("data"),
+            ..KernelConfig::default()
+        };
+        let kernel = OpenFangKernel::boot_with_config(config.clone()).expect("kernel boots");
+
+        // Operator changes two things at once: an approval-policy field
+        // (kernel genuinely applies this in-process today) and adds a
+        // Telegram channel (kernel only logs this — no in-process apply
+        // path exists yet, see FANG-40).
+        let mut new_config = config.clone();
+        new_config.approval.timeout_secs = 120;
+        new_config.channels.telegram = Some(TelegramConfig::default());
+
+        let plan = build_reload_plan(&kernel.config, &new_config);
+        assert!(
+            plan.hot_actions.contains(&HotAction::UpdateApprovalPolicy),
+            "approval change must be in the diff"
+        );
+        assert!(
+            plan.hot_actions.contains(&HotAction::ReloadChannels),
+            "channels change must be in the diff"
+        );
+        // Before apply, the honest-outcome buckets must still be empty —
+        // `hot_actions` is a plan, not a receipt.
+        assert!(plan.applied_actions.is_empty());
+        assert!(plan.deferred_actions.is_empty());
+
+        let result = kernel.apply_hot_actions(&plan, &new_config);
+
+        assert!(
+            result.applied.contains(&HotAction::UpdateApprovalPolicy),
+            "approval policy has a real apply path and must be marked applied"
+        );
+        assert!(
+            !result.applied.contains(&HotAction::ReloadChannels),
+            "ReloadChannels has no in-process apply path — it must NOT be reported as applied"
+        );
+        assert!(
+            result.deferred.contains(&HotAction::ReloadChannels),
+            "ReloadChannels must be reported as deferred (restart required)"
+        );
+        assert!(
+            !result.deferred.contains(&HotAction::UpdateApprovalPolicy),
+            "an action that was genuinely applied must not also show up as deferred"
+        );
+
+        // And the effect actually landed for the applied action.
+        assert_eq!(
+            kernel.approval_manager.policy().timeout_secs,
+            120,
+            "UpdateApprovalPolicy must have mutated the running approval manager"
+        );
+
+        kernel.shutdown();
+    }
+
+    /// End-to-end: `reload_config()` (the path both the API routes and the
+    /// background watcher call) must populate `applied_actions` /
+    /// `deferred_actions` on the plan it returns, not just `hot_actions`.
+    #[test]
+    fn test_reload_config_reports_applied_and_deferred_separately() {
+        use crate::config_reload::HotAction;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let home_dir = tmp.path().join("openfang-fang42-reload-config");
+        std::fs::create_dir_all(&home_dir).unwrap();
+
+        let config = KernelConfig {
+            home_dir: home_dir.clone(),
+            data_dir: home_dir.join("data"),
+            ..KernelConfig::default()
+        };
+        let kernel = OpenFangKernel::boot_with_config(config.clone()).expect("kernel boots");
+
+        // Write a config.toml that changes both an applied-in-process field
+        // (max_cron_jobs) and a detected-but-not-applied field (telegram
+        // channel), the way an operator editing config.toml by hand would.
+        let config_toml = r#"
+max_cron_jobs = 7
+
+[channels.telegram]
+bot_token_env = "TELEGRAM_BOT_TOKEN"
+"#;
+        std::fs::write(home_dir.join("config.toml"), config_toml).unwrap();
+
+        let plan = kernel.reload_config().expect("reload_config succeeds");
+
+        assert!(
+            plan.applied_actions.contains(&HotAction::UpdateCronConfig),
+            "max_cron_jobs change must be reported as actually applied"
+        );
+        assert!(
+            plan.deferred_actions.contains(&HotAction::ReloadChannels),
+            "telegram channel change must be reported as deferred, not applied"
+        );
+        assert!(
+            !plan.applied_actions.contains(&HotAction::ReloadChannels),
+            "channels must never be claimed as applied — this is the FANG-42 regression"
+        );
 
         kernel.shutdown();
     }

@@ -829,9 +829,12 @@ pub async fn run_daemon(
                     tracing::info!("Config file changed, reloading...");
                     match k.reload_config() {
                         Ok(plan) => {
-                            if plan.has_changes() {
-                                tracing::info!("Config hot-reload applied: {:?}", plan.hot_actions);
-                            } else {
+                            // `reload_config` already logged the honest
+                            // applied-vs-deferred split via
+                            // `plan.log_apply_outcome()` — do not re-summarize
+                            // `plan.hot_actions` here as "applied", since that
+                            // list is only the diff, not a receipt (FANG-42).
+                            if !plan.has_changes() {
                                 tracing::debug!("Config hot-reload: no actionable changes");
                             }
                         }

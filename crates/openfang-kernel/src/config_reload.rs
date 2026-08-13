@@ -1,7 +1,23 @@
 //! Config hot-reload — diffs two `KernelConfig` instances and produces a `ReloadPlan`.
 //!
-//! **Hot-reload safe**: channels, skills, usage footer, web config, browser,
-//! approval policy, cron settings, webhook triggers, extensions.
+//! **Beware**: the categories below describe what `build_reload_plan` detects
+//! as *theoretically* hot-reloadable (i.e. not requiring a restart in
+//! principle), not what `OpenFangKernel::apply_hot_actions` actually mutates
+//! in-process today. Those are different things — see FANG-42. Only
+//! `plan.applied_actions` (populated after `reload_config` runs) is proof
+//! that a change took effect without a restart.
+//!
+//! **Actually applied in-process** (kernel state genuinely mutated, no
+//! restart needed): approval policy, cron max jobs, provider URL overrides,
+//! default model, fallback provider chain.
+//!
+//! **Detected as hot-reloadable, but NOT yet applied in-process** (kernel
+//! only logs the change; the running daemon keeps behaving on the old
+//! config until restarted): channels, skills, usage footer, web config,
+//! browser, webhook triggers, extensions, MCP servers, A2A config. Wiring
+//! these up is tracked separately per subsystem (e.g. channels needs
+//! `ChannelAdapter::stop()`, see FANG-40) — do not report them as applied
+//! before that lands.
 //!
 //! **No-op** (informational only): log_level, language, mode.
 //!
@@ -56,16 +72,29 @@ pub enum HotAction {
 /// After building a plan via [`build_reload_plan`], callers inspect
 /// `restart_required` to decide whether a full restart is needed or
 /// the `hot_actions` can be applied in-place.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ReloadPlan {
     /// Whether a full restart is needed.
     pub restart_required: bool,
     /// Human-readable reasons why restart is required.
     pub restart_reasons: Vec<String>,
-    /// Actions that can be hot-reloaded without restart.
+    /// Actions that the config diff *could* be hot-reloaded without restart.
+    ///
+    /// This is a plan, not a receipt — membership here means the change was
+    /// detected and is theoretically hot-reloadable, not that it was applied.
+    /// Check `applied_actions` / `deferred_actions` (populated after
+    /// `OpenFangKernel::reload_config` runs) for what actually happened.
     pub hot_actions: Vec<HotAction>,
     /// Fields that changed but are no-ops (informational only).
     pub noop_changes: Vec<String>,
+    /// Subset of `hot_actions` that were actually applied to the running
+    /// kernel state. Empty until `reload_config` has run the apply step.
+    pub applied_actions: Vec<HotAction>,
+    /// Subset of `hot_actions` that were detected but NOT applied — either
+    /// because the reload mode doesn't auto-apply, or because the kernel has
+    /// no in-process apply path for that action yet. These require a daemon
+    /// restart to take effect.
+    pub deferred_actions: Vec<HotAction>,
 }
 
 impl ReloadPlan {
@@ -79,7 +108,11 @@ impl ReloadPlan {
         !self.restart_required
     }
 
-    /// Log a human-readable summary of the plan.
+    /// Log a human-readable summary of the diff plan.
+    ///
+    /// Called before the apply step, so this only reports what changed and
+    /// was *detected* as hot-reloadable — not what was actually applied.
+    /// Call `log_apply_outcome` after the apply step for the honest receipt.
     pub fn log_summary(&self) {
         if !self.has_changes() {
             info!("config reload: no changes detected");
@@ -96,6 +129,25 @@ impl ReloadPlan {
         }
         for noop in &self.noop_changes {
             info!("config reload: no-op change — {noop}");
+        }
+    }
+
+    /// Log the honest outcome of the apply step: what was actually applied
+    /// vs. what is still waiting on a restart. Call this after
+    /// `applied_actions`/`deferred_actions` have been populated.
+    pub fn log_apply_outcome(&self) {
+        if !self.applied_actions.is_empty() {
+            info!(
+                "config reload: applied in-process — {:?}",
+                self.applied_actions
+            );
+        }
+        if !self.deferred_actions.is_empty() {
+            warn!(
+                "config reload: {} action(s) detected but NOT applied — restart the daemon for them to take effect: {:?}",
+                self.deferred_actions.len(),
+                self.deferred_actions
+            );
         }
     }
 }
@@ -126,6 +178,8 @@ pub fn build_reload_plan(old: &KernelConfig, new: &KernelConfig) -> ReloadPlan {
         restart_reasons: Vec::new(),
         hot_actions: Vec::new(),
         noop_changes: Vec::new(),
+        applied_actions: Vec::new(),
+        deferred_actions: Vec::new(),
     };
 
     // ----- Restart-required fields -----
@@ -617,6 +671,7 @@ mod tests {
             restart_reasons: vec![],
             hot_actions: vec![],
             noop_changes: vec![],
+            ..Default::default()
         };
         assert!(!plan.has_changes());
 
@@ -626,6 +681,7 @@ mod tests {
             restart_reasons: vec![],
             hot_actions: vec![],
             noop_changes: vec!["log_level: info -> debug".to_string()],
+            ..Default::default()
         };
         assert!(plan.has_changes());
 
@@ -635,6 +691,7 @@ mod tests {
             restart_reasons: vec![],
             hot_actions: vec![HotAction::UpdateCronConfig],
             noop_changes: vec![],
+            ..Default::default()
         };
         assert!(plan.has_changes());
 
@@ -644,6 +701,7 @@ mod tests {
             restart_reasons: vec!["api_listen changed".to_string()],
             hot_actions: vec![],
             noop_changes: vec![],
+            ..Default::default()
         };
         assert!(plan.has_changes());
     }
@@ -655,6 +713,7 @@ mod tests {
             restart_reasons: vec![],
             hot_actions: vec![HotAction::ReloadChannels],
             noop_changes: vec![],
+            ..Default::default()
         };
         assert!(plan.is_hot_reloadable());
 
@@ -663,6 +722,7 @@ mod tests {
             restart_reasons: vec!["api_listen changed".to_string()],
             hot_actions: vec![HotAction::ReloadChannels],
             noop_changes: vec![],
+            ..Default::default()
         };
         assert!(!plan.is_hot_reloadable());
     }
@@ -712,6 +772,7 @@ mod tests {
             restart_reasons: vec![],
             hot_actions: vec![HotAction::ReloadChannels],
             noop_changes: vec![],
+            ..Default::default()
         };
         assert!(!should_apply_hot(ReloadMode::Off, &plan));
     }
@@ -723,6 +784,7 @@ mod tests {
             restart_reasons: vec![],
             hot_actions: vec![HotAction::ReloadChannels],
             noop_changes: vec![],
+            ..Default::default()
         };
         assert!(!should_apply_hot(ReloadMode::Restart, &plan));
     }
@@ -734,6 +796,7 @@ mod tests {
             restart_reasons: vec![],
             hot_actions: vec![HotAction::ReloadChannels],
             noop_changes: vec![],
+            ..Default::default()
         };
         assert!(should_apply_hot(ReloadMode::Hybrid, &plan));
         assert!(should_apply_hot(ReloadMode::Hot, &plan));
@@ -746,6 +809,7 @@ mod tests {
             restart_reasons: vec![],
             hot_actions: vec![],
             noop_changes: vec![],
+            ..Default::default()
         };
         assert!(!should_apply_hot(ReloadMode::Hybrid, &plan));
     }

@@ -11172,9 +11172,16 @@ pub async fn config_reload(State(state): State<Arc<AppState>>) -> impl IntoRespo
     );
     match state.kernel.reload_config() {
         Ok(plan) => {
+            // `status` must reflect what actually happened, not merely what
+            // the diff found hot-reloadable. `plan.deferred_actions` covers
+            // both "no in-process apply path yet" and "reload mode doesn't
+            // auto-apply" — either way the operator needs to restart for
+            // those specific actions (see FANG-42).
             let status = if plan.restart_required {
                 "partial"
-            } else if plan.has_changes() {
+            } else if !plan.deferred_actions.is_empty() {
+                "partial"
+            } else if !plan.applied_actions.is_empty() {
                 "applied"
             } else {
                 "no_changes"
@@ -11186,7 +11193,15 @@ pub async fn config_reload(State(state): State<Arc<AppState>>) -> impl IntoRespo
                     "status": status,
                     "restart_required": plan.restart_required,
                     "restart_reasons": plan.restart_reasons,
-                    "hot_actions_applied": plan.hot_actions.iter().map(|a| format!("{a:?}")).collect::<Vec<_>>(),
+                    "hot_actions_applied": plan.applied_actions.iter().map(|a| format!("{a:?}")).collect::<Vec<_>>(),
+                    "hot_actions_deferred": plan.deferred_actions.iter().map(|a| format!("{a:?}")).collect::<Vec<_>>(),
+                    "deferred_note": if plan.deferred_actions.is_empty() {
+                        serde_json::Value::Null
+                    } else {
+                        serde_json::Value::String(
+                            "these actions were detected in the config diff but were NOT applied to the running daemon — restart it for them to take effect".to_string(),
+                        )
+                    },
                     "noop_changes": plan.noop_changes,
                 })),
             )
@@ -11410,7 +11425,11 @@ pub async fn config_set(
     // Trigger reload
     let reload_status = match state.kernel.reload_config() {
         Ok(plan) => {
-            if plan.restart_required {
+            // Same honesty rule as `config_reload`: `deferred_actions` means
+            // the change is saved to disk but NOT live yet — that's a
+            // restart-required outcome from the operator's point of view,
+            // even when `restart_required` itself is false (FANG-42).
+            if plan.restart_required || !plan.deferred_actions.is_empty() {
                 "applied_partial"
             } else {
                 "applied"

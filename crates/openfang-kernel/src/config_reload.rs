@@ -8,16 +8,23 @@
 //! that a change took effect without a restart.
 //!
 //! **Actually applied in-process** (kernel state genuinely mutated, no
-//! restart needed): approval policy, cron max jobs, provider URL overrides,
-//! default model, fallback provider chain.
+//! restart needed): approval policy, cron max jobs, default model, fallback
+//! provider chain.
 //!
 //! **Detected as hot-reloadable, but NOT yet applied in-process** (kernel
 //! only logs the change; the running daemon keeps behaving on the old
-//! config until restarted): channels, skills, usage footer, web config,
-//! browser, webhook triggers, extensions, MCP servers, A2A config. Wiring
+//! config until restarted): channels, provider URL overrides, skills, usage
+//! footer, web config, browser, webhook triggers, extensions, MCP servers,
+//! A2A config. Wiring
 //! these up is tracked separately per subsystem (e.g. channels needs
 //! `ChannelAdapter::stop()`, see FANG-40) — do not report them as applied
 //! before that lands.
+//!
+//! Caveat on default model: the override slot is read by `resolve_driver` on
+//! every message, so key/base_url/timeout changes do take effect — but the
+//! default model is overlaid onto an agent manifest only at load time, so
+//! changing `[default_model].model` will not switch the model of an agent that
+//! is already running.
 //!
 //! **No-op** (informational only): log_level, language, mode.
 //!

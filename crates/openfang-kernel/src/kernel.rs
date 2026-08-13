@@ -4239,13 +4239,29 @@ impl OpenFangKernel {
                     result.applied.push(action.clone());
                 }
                 HotAction::ReloadProviderUrls => {
-                    info!("Hot-reload: applying provider URL overrides");
+                    // Deferred, not applied — even though the catalog write below does happen.
+                    // lookup_provider_url() consults self.config.provider_urls first and the
+                    // catalog only as a fallback, and self.config is frozen at boot
+                    // (reload_config takes &self and never rewrites it). So for any provider
+                    // already present in the boot-time [provider_urls] this updates
+                    // /api/providers and leaves the driver's base_url untouched: the next LLM
+                    // call still goes to the old address.
+                    //
+                    // The catalog write is kept because it does take effect for a provider that
+                    // was NOT in the boot config. Claiming "applied" for both cases is exactly
+                    // the lie this commit exists to remove, and the receipt cannot tell them
+                    // apart without inspecting every key — so the honest answer is deferred.
+                    // Making it truly hot needs the lookup order changed or config behind a
+                    // lock; that is separate work, like ReloadChannels.
+                    info!(
+                        "Hot-reload: writing provider URL overrides to the catalog;                          base_url resolution still prefers the boot config, so a restart                          is required for providers already listed there"
+                    );
                     let mut catalog = self
                         .model_catalog
                         .write()
                         .unwrap_or_else(|e| e.into_inner());
                     catalog.apply_url_overrides(&new_config.provider_urls);
-                    result.applied.push(action.clone());
+                    result.deferred.push(action.clone());
                 }
                 HotAction::UpdateDefaultModel => {
                     info!(

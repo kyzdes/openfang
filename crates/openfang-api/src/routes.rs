@@ -3704,12 +3704,18 @@ pub async fn prometheus_metrics(State(state): State<Arc<AppState>>) -> impl Into
 
     // Per-CALL counters: monotonic since process start, labelled with the
     // provider and model that actually served each call.
+    // Returns None for an agent that is no longer in the registry, and the caller drops
+    // the series rather than relabelling it. Falling back to the UUID looks harmless but
+    // renames a live counter: the old `agent="name"` series goes stale while an identical
+    // `agent="<uuid>"` series appears carrying the same accumulated value, so increase()
+    // sees a step from zero and sum() double-counts through the staleness window. That is
+    // the exact regression the frozen series was frozen to avoid.
+    //
+    // Dropping loses history for a deleted agent, which is the lesser evil: the counters
+    // are process-lifetime and the agent is gone. It also bounds cardinality, since the
+    // counter map itself is never pruned.
     let agent_name = |id: openfang_types::agent::AgentId| {
-        agents
-            .iter()
-            .find(|a| a.id == id)
-            .map(|a| a.name.clone())
-            .unwrap_or_else(|| id.to_string())
+        agents.iter().find(|a| a.id == id).map(|a| a.name.clone())
     };
     let mut per_model: Vec<(String, String, String, u64, u64, u64)> = state
         .kernel
@@ -3717,8 +3723,8 @@ pub async fn prometheus_metrics(State(state): State<Arc<AppState>>) -> impl Into
         .counters
         .snapshot_per_model()
         .into_iter()
-        .map(|(id, provider, model, calls, input, output)| {
-            (agent_name(id), provider, model, calls, input, output)
+        .filter_map(|(id, provider, model, calls, input, output)| {
+            agent_name(id).map(|name| (name, provider, model, calls, input, output))
         })
         .collect();
     per_model.sort();
@@ -3728,7 +3734,9 @@ pub async fn prometheus_metrics(State(state): State<Arc<AppState>>) -> impl Into
         .counters
         .snapshot_substitutions()
         .into_iter()
-        .map(|(id, requested, served, calls)| (agent_name(id), requested, served, calls))
+        .filter_map(|(id, requested, served, calls)| {
+            agent_name(id).map(|name| (name, requested, served, calls))
+        })
         .collect();
     substitutions.sort();
     render_llm_call_metrics(&mut out, &per_model, &substitutions);

@@ -324,10 +324,23 @@ impl UsageStore {
 
         let mut stmt = conn
             .prepare(
-                "SELECT model, provider, COALESCE(SUM(cost_usd), 0.0), COALESCE(SUM(input_tokens), 0),
+                // Grouped by model alone, deliberately. `GROUP BY model, provider` splits every
+                // model in two after the v9 migration: rows written before it carry
+                // provider = NULL, rows written after carry the real provider. The dashboard
+                // keys its table on `m.model` (static/index_body.html), and Alpine keeps one
+                // node per key — so a duplicated key silently renders the wrong row's numbers
+                // on the one screen this data exists for.
+                //
+                // `provider` is therefore reported only when the model has exactly one across
+                // all its rows; a model served by two providers reports NULL rather than
+                // arbitrarily picking one. Per-provider figures live in the new
+                // openfang_llm_* metrics, which carry both labels without this ambiguity.
+                "SELECT model,
+                        CASE WHEN COUNT(DISTINCT provider) = 1 THEN MAX(provider) ELSE NULL END,
+                        COALESCE(SUM(cost_usd), 0.0), COALESCE(SUM(input_tokens), 0),
                         COALESCE(SUM(output_tokens), 0), COUNT(*), COUNT(DISTINCT turn_id),
                         COALESCE(SUM(requested_model IS NOT NULL), 0)
-                 FROM usage_events GROUP BY model, provider ORDER BY SUM(cost_usd) DESC",
+                 FROM usage_events GROUP BY model ORDER BY SUM(cost_usd) DESC",
             )
             .map_err(|e| OpenFangError::Memory(e.to_string()))?;
 

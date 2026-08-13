@@ -1373,7 +1373,11 @@ async fn call_with_retry(
                                     CallReport {
                                         substituted: Some(fb.model.clone()),
                                         provider: Some(fb.provider.clone()),
-                                        reason: Some(raw_error.clone()),
+                                        // sanitized, not raw: this reaches the caller in
+                                        // calls[].reason and onward to SSE/WS/openai-compat.
+                                        reason: Some(
+                                            classified.sanitized_message.clone(),
+                                        ),
                                     },
                                 ));
                             }
@@ -1566,7 +1570,11 @@ async fn stream_with_retry(
                                     CallReport {
                                         substituted: Some(fb.model.clone()),
                                         provider: Some(fb.provider.clone()),
-                                        reason: Some(raw_error.clone()),
+                                        // sanitized, not raw: this reaches the caller in
+                                        // calls[].reason and onward to SSE/WS/openai-compat.
+                                        reason: Some(
+                                            classified.sanitized_message.clone(),
+                                        ),
                                     },
                                 ));
                             }

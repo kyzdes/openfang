@@ -178,7 +178,15 @@ impl LlmDriver for FallbackDriver {
                         }
                     );
                     if i == 0 {
-                        first_error = Some(e.to_string());
+                        // Sanitised, not raw: this string reaches the caller in the response
+                        // body (fallback.reason, calls[].reason) and onward to
+                        // /v1/chat/completions, SSE and WS. A provider's 401 body quotes the
+                        // key it rejected, so `e.to_string()` here published one. The ordinary
+                        // error path already guards this — llm_errors::sanitize_for_user
+                        // redacts sk-/key-/Bearer, strips HTML error pages and caps length.
+                        let raw = e.to_string();
+                        first_error =
+                            Some(crate::llm_errors::classify_error(&raw, None).sanitized_message);
                     }
                     last_error = Some(e);
                 }
@@ -221,7 +229,15 @@ impl LlmDriver for FallbackDriver {
                         }
                     );
                     if i == 0 {
-                        first_error = Some(e.to_string());
+                        // Sanitised, not raw: this string reaches the caller in the response
+                        // body (fallback.reason, calls[].reason) and onward to
+                        // /v1/chat/completions, SSE and WS. A provider's 401 body quotes the
+                        // key it rejected, so `e.to_string()` here published one. The ordinary
+                        // error path already guards this — llm_errors::sanitize_for_user
+                        // redacts sk-/key-/Bearer, strips HTML error pages and caps length.
+                        let raw = e.to_string();
+                        first_error =
+                            Some(crate::llm_errors::classify_error(&raw, None).sanitized_message);
                     }
                     last_error = Some(e);
                 }

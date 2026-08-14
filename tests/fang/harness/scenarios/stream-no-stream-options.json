@@ -1,0 +1,17 @@
+{
+  "name": "stream-no-stream-options",
+  "doc": "F14: provider 400s when it sees stream_options; driver is expected to retry the stream without it. First (rejected) request does not consume a step.",
+  "endpoints": [
+    {
+      "role": "primary",
+      "port": 8972,
+      "prefix": "/primary/v1",
+      "open": true,
+      "stream_quirks": ["reject_stream_options"],
+      "steps": [
+        { "type": "text", "content": "answered without stream_options", "usage": [4, 6] }
+      ],
+      "default_step": { "type": "text", "content": "still without stream_options.", "usage": [1, 1] }
+    }
+  ]
+}

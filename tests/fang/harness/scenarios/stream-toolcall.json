@@ -1,0 +1,17 @@
+{
+  "name": "stream-toolcall",
+  "doc": "F14: streamed tool_call delta accumulation. First chunk MUST carry id+function.name or the driver silently drops the call; arguments always split across >=2 fragments here.",
+  "endpoints": [
+    {
+      "role": "primary",
+      "port": 8972,
+      "prefix": "/primary/v1",
+      "open": true,
+      "steps": [
+        { "type": "tool_call", "name": "memory_store", "arguments": { "key": "streamed", "value": "yes", "note": "fragmented across chunks" }, "usage": [10, 8] },
+        { "type": "text", "content": "Done via streamed tool call.", "usage": [5, 5] }
+      ],
+      "default_step": { "type": "text", "content": "already done.", "usage": [1, 1] }
+    }
+  ]
+}

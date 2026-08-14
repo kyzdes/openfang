@@ -1,0 +1,17 @@
+{
+  "name": "toolcall-then-text",
+  "doc": "Two-iteration turn on a single endpoint: iteration 1 requests a tool call, iteration 2 (after the tool result comes back in the messages array) answers in text.",
+  "endpoints": [
+    {
+      "role": "primary",
+      "port": 8972,
+      "prefix": "/primary/v1",
+      "open": true,
+      "steps": [
+        { "type": "tool_call", "name": "memory_store", "arguments": { "key": "probe", "value": "fangrig" }, "usage": [10, 8] },
+        { "type": "text", "content": "Stored it.", "usage": [20, 3] }
+      ],
+      "default_step": { "type": "text", "content": "already stored.", "usage": [1, 1] }
+    }
+  ]
+}

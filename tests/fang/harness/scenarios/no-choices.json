@@ -1,0 +1,16 @@
+{
+  "name": "no-choices",
+  "doc": "Empty choices array -> LlmError::Parse(\"No choices in response\") (openai.rs:744-748).",
+  "endpoints": [
+    {
+      "role": "primary",
+      "port": 8972,
+      "prefix": "/primary/v1",
+      "open": true,
+      "steps": [
+        { "type": "empty_choices", "usage": [3, 0] }
+      ],
+      "default_step": { "type": "empty_choices", "usage": [1, 0] }
+    }
+  ]
+}

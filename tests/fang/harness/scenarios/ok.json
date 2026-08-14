@@ -1,0 +1,16 @@
+{
+  "name": "ok",
+  "doc": "Control: one endpoint, one text reply. If this is not green, the harness itself is broken, not the product.",
+  "endpoints": [
+    {
+      "role": "primary",
+      "port": 8972,
+      "prefix": "/primary/v1",
+      "open": true,
+      "steps": [
+        { "type": "text", "content": "The answer is 4.", "usage": [12, 6] }
+      ],
+      "default_step": { "type": "text", "content": "still 4.", "usage": [1, 1] }
+    }
+  ]
+}

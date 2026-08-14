@@ -1,0 +1,26 @@
+{
+  "name": "bad-gateway-502",
+  "doc": "502 (NOT 500 - see F11) from primary must trigger the fallback chain. fallback then answers normally.",
+  "endpoints": [
+    {
+      "role": "primary",
+      "port": 8972,
+      "prefix": "/primary/v1",
+      "open": true,
+      "steps": [
+        { "type": "status", "code": 502, "body": { "error": { "message": "fangrig: synthetic bad gateway" } } }
+      ],
+      "default_step": { "type": "status", "code": 502, "body": { "error": { "message": "fangrig: synthetic bad gateway" } } }
+    },
+    {
+      "role": "fallback",
+      "port": 8971,
+      "prefix": "/fallback/v1",
+      "open": true,
+      "steps": [
+        { "type": "text", "content": "answered by fallback after primary 502", "usage": [5, 5] }
+      ],
+      "default_step": { "type": "text", "content": "answered by fallback (repeat)", "usage": [1, 1] }
+    }
+  ]
+}

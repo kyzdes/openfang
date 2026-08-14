@@ -1,0 +1,32 @@
+{
+  "name": "split-turn",
+  "doc": "The exact split-turn shape from sprint 2: fallback answers iteration 1 (a tool_call) and, via 'then', opens primary; primary answers iteration 2. Rollup counts MUST read {\"primary\":1,\"fallback\":1} after one turn.",
+  "endpoints": [
+    {
+      "role": "primary",
+      "port": 8972,
+      "prefix": "/primary/v1",
+      "open": false,
+      "steps": [
+        { "type": "text", "content": "second iteration, answered by primary", "usage": [15, 5] }
+      ],
+      "default_step": { "type": "text", "content": "primary (repeat)", "usage": [1, 1] }
+    },
+    {
+      "role": "fallback",
+      "port": 8971,
+      "prefix": "/fallback/v1",
+      "open": true,
+      "steps": [
+        {
+          "type": "tool_call",
+          "name": "memory_store",
+          "arguments": { "key": "probe", "value": "split" },
+          "usage": [10, 8],
+          "then": { "open": "primary" }
+        }
+      ],
+      "default_step": { "type": "text", "content": "fallback exhausted", "usage": [1, 1] }
+    }
+  ]
+}

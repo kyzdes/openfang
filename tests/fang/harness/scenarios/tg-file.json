@@ -1,0 +1,23 @@
+{
+  "name": "tg-file",
+  "doc": "Telegram file path end-to-end (FANG-43 shape): a document update arrives, the adapter calls getFile then downloads /file/bot<token>/<path>. Needs `fangrig up tg-file --tg`, THEN `fangrig agent probe`, THEN `fangrig tg-send document` — deliberately no pre-queued 'updates' here: default_agent only resolves once the named agent exists (see the comment in `fangrig agent`), so anything delivered before that exists routes to whatever the daemon's persisted bindings fall back to instead, not to this scenario's stub.",
+  "endpoints": [
+    {
+      "role": "primary",
+      "port": 8972,
+      "prefix": "/primary/v1",
+      "open": true,
+      "steps": [
+        { "type": "text", "content": "Got your file, thanks!", "usage": [10, 5] }
+      ],
+      "default_step": { "type": "text", "content": "Got another one.", "usage": [1, 1] }
+    }
+  ],
+  "telegram": {
+    "port": 8981,
+    "token": "424242:FANGRIG-fake-token-do-not-reuse",
+    "default_agent": "fangrig-probe",
+    "queue_policy": "permissive",
+    "updates": []
+  }
+}

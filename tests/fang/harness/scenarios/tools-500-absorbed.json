@@ -1,0 +1,17 @@
+{
+  "name": "tools-500-absorbed",
+  "doc": "F11: HTTP 500 while tools is non-empty is absorbed by the SAME driver as 'model doesn't support tools' - it strips tools and retries the SAME endpoint. It never reaches the fallback chain, unlike bad-gateway-502.json. Two steps: 500 (tools present) then text (tools stripped).",
+  "endpoints": [
+    {
+      "role": "primary",
+      "port": 8972,
+      "prefix": "/primary/v1",
+      "open": true,
+      "steps": [
+        { "type": "status", "code": 500, "body": { "error": { "message": "internal error" } } },
+        { "type": "text", "content": "answered after tools were stripped", "usage": [4, 4] }
+      ],
+      "default_step": { "type": "text", "content": "still no tools", "usage": [1, 1] }
+    }
+  ]
+}

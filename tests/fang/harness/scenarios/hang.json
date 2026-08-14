@@ -1,0 +1,16 @@
+{
+  "name": "hang",
+  "doc": "F2+F3: the OpenAI driver builds its reqwest client with no .timeout(). A stub that never answers hangs the turn FOREVER, not with an error. Use this to confirm that fact, not to wait it out - fangrig down cancels the agent regardless of the pending call.",
+  "endpoints": [
+    {
+      "role": "primary",
+      "port": 8972,
+      "prefix": "/primary/v1",
+      "open": true,
+      "steps": [
+        { "type": "hang", "seconds": 120 }
+      ],
+      "default_step": { "type": "hang", "seconds": 120 }
+    }
+  ]
+}

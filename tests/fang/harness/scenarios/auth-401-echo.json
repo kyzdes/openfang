@@ -1,0 +1,20 @@
+{
+  "name": "auth-401-echo",
+  "doc": "A7: LiteLLM-style 401 puts the caller's key back in the error body. LlmError::Api{status,message:body} carries the whole body up to the API response and into the session file. key_echo is redaction-safe: it only ever echoes the harness canary, never a real key, even if one leaked in by mistake.",
+  "endpoints": [
+    {
+      "role": "primary",
+      "port": 8972,
+      "prefix": "/primary/v1",
+      "open": true,
+      "steps": [
+        {
+          "type": "status",
+          "code": 401,
+          "body_template": "{\"error\":{\"message\":\"Authentication Error, provided api key: {{key_echo}} does not match any key in our records. run={{run_id}} canary={{canary}}\",\"type\":\"authentication_error\"}}"
+        }
+      ],
+      "default_step": { "type": "text", "content": "unreachable" }
+    }
+  ]
+}

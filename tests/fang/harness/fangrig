@@ -1,0 +1,802 @@
+#!/usr/bin/env bash
+# FANG-52 — fangrig: bring up a fake OpenAI-compatible provider + fake
+# Telegram Bot API in the staging container's netns, point a probe agent
+# at them, and prove what happened via a durable journal file.
+#
+# Read tests/fang/harness/README.md first — three minutes, saves an hour.
+#
+#   fangrig up <scenario> [--net share|bridge] [--with-key] [--tg] [--no-selftest]
+#   fangrig down
+#   fangrig agent <name> [--fallback] [--tools t1,t2]
+#   fangrig say <agent> "<text>" [--stream]
+#   fangrig tg-send <index|kind> [--file <name>]
+#   fangrig journal [--json|--raw|--rollup]
+#   fangrig selftest
+#   fangrig status
+set -uo pipefail
+
+HARNESS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib.sh
+source "$HARNESS_DIR/lib.sh"
+
+usage() {
+  sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'
+  exit "${1:-0}"
+}
+
+# ============================================================== up =======
+cmd_up() {
+  local scenario="" net_mode="share" with_key=0 do_tg=0 do_selftest=1
+  [ $# -ge 1 ] || die "usage: fangrig up <scenario> [--net share|bridge] [--with-key] [--tg] [--no-selftest]"
+  scenario="$1"; shift
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --net) net_mode="$2"; shift 2 ;;
+      --target) shift 2 ;; # accepted, staging is the only supported target today
+      --with-key) with_key=1; shift ;;
+      --tg) do_tg=1; shift ;;
+      --no-selftest) do_selftest=0; shift ;;
+      *) die "unknown flag: $1" ;;
+    esac
+  done
+
+  guard_not_prod
+  require_bin docker python3
+
+  local run_id dir
+  run_id="$(new_run_id)"
+  dir="$RUN_ROOT/$run_id"
+  mkdir -p "$dir"
+  : > "$dir/journal.jsonl"
+  : > "$dir/tg-journal.jsonl"
+  : > "$dir/stub.log"
+  mkdir -p "$RUN_ROOT"
+  ln -sfn "$dir" "$CURRENT_LINK"
+
+  local src; src="$(scenario_path "$scenario")"
+  render_scenario "$src" "$dir/scenario.json" "$run_id"
+
+  local scen_name has_tg
+  scen_name="$(python3 -c "import json;print(json.load(open('$dir/scenario.json')).get('name','?'))")"
+  has_tg="$(python3 -c "import json;print('yes' if json.load(open('$dir/scenario.json')).get('telegram') else 'no')")"
+
+  # ---- gather ports, check they're free INSIDE the staging netns --------
+  local ports; ports="$(python3 -c "
+import json
+d = json.load(open('$dir/scenario.json'))
+ps = sorted({e['port'] for e in d.get('endpoints', [])})
+print(' '.join(str(p) for p in ps))
+")"
+  local tg_port=""
+  if [ "$do_tg" = 1 ]; then
+    [ "$has_tg" = "yes" ] || die "scenario '$scenario' has no [telegram] block — drop --tg" 4
+    tg_port="$(python3 -c "import json;print(json.load(open('$dir/scenario.json'))['telegram'].get('port',8981))")"
+  fi
+
+  for p in $ports ${tg_port:+$tg_port}; do
+    if ! port_free_in_container "$p"; then
+      log "fangrig: port $p is already bound inside $CONTAINER — is another run still up? (fangrig down)"
+      exit 4
+    fi
+  done
+
+  local image; image="$(container_image)"
+  local llm_container="fangrig-llm-$run_id"
+  local tg_container="fangrig-tg-$run_id"
+  local network_name=""
+  local stub_containers=()
+
+  if [ "$net_mode" = "share" ]; then
+    docker run -d --name "$llm_container" \
+      --network "container:$CONTAINER" \
+      -v "$dir":/rig -v "$HARNESS_DIR":/harness:ro \
+      --entrypoint python3 "$image" /harness/llm_stub.py /rig/scenario.json /rig \
+      >/dev/null || die "failed to start $llm_container" 4
+    stub_containers+=("$llm_container")
+    if [ "$do_tg" = 1 ]; then
+      docker run -d --name "$tg_container" \
+        --network "container:$CONTAINER" \
+        -v "$dir":/rig -v "$HARNESS_DIR":/harness:ro \
+        --entrypoint python3 "$image" /harness/tg_stub.py /rig/scenario.json /rig \
+        >/dev/null || die "failed to start $tg_container" 4
+      stub_containers+=("$tg_container")
+    fi
+  elif [ "$net_mode" = "bridge" ]; then
+    network_name="fangrig-net-$run_id"
+    docker network create "$network_name" >/dev/null || die "failed to create network $network_name" 4
+    local pubargs=()
+    for p in $ports; do pubargs+=(-p "127.0.0.1:$p:$p"); done
+    docker run -d --name "$llm_container" \
+      --network "$network_name" --network-alias fangrig-llm \
+      -e FANGRIG_BIND_HOST=0.0.0.0 \
+      "${pubargs[@]}" \
+      -v "$dir":/rig -v "$HARNESS_DIR":/harness:ro \
+      --entrypoint python3 "$image" /harness/llm_stub.py /rig/scenario.json /rig \
+      >/dev/null || die "failed to start $llm_container" 4
+    stub_containers+=("$llm_container")
+    if [ "$do_tg" = 1 ]; then
+      docker run -d --name "$tg_container" \
+        --network "$network_name" --network-alias fangrig-tg \
+        -e FANGRIG_BIND_HOST=0.0.0.0 \
+        -p "127.0.0.1:$tg_port:$tg_port" \
+        -v "$dir":/rig -v "$HARNESS_DIR":/harness:ro \
+        --entrypoint python3 "$image" /harness/tg_stub.py /rig/scenario.json /rig \
+        >/dev/null || die "failed to start $tg_container" 4
+      stub_containers+=("$tg_container")
+    fi
+    docker network connect "$network_name" "$CONTAINER" || die "failed to attach $CONTAINER to $network_name" 4
+  else
+    die "unknown --net mode: $net_mode (want share|bridge)" 4
+  fi
+  for c in "${stub_containers[@]}"; do
+    docker logs "$c" >> "$dir/stub.log" 2>&1 &
+  done
+
+  # ---- write state before the gate, so `down` can clean up either way ---
+  state_write "$dir" \
+    "run_id=\"$run_id\"" \
+    "scenario=\"$scen_name\"" \
+    "scenario_file=\"$scenario\"" \
+    "net_mode=\"$net_mode\"" \
+    "container=\"$CONTAINER\"" \
+    "with_key=$([ "$with_key" = 1 ] && echo true || echo false)" \
+    "tg=$([ "$do_tg" = 1 ] && echo true || echo false)" \
+    "tg_port=${tg_port:-null}" \
+    "config_orig=null" \
+    "network_name=$([ -n "$network_name" ] && echo "\"$network_name\"" || echo null)" \
+    "stub_containers=$(printf '%s\n' "${stub_containers[@]}" | python3 -c "import json,sys;print(json.dumps([l.strip() for l in sys.stdin if l.strip()]))")" \
+    "agents=[]"
+
+  # ---- gate: reachable from inside the container, or bail loudly -------
+  local llm_host; llm_host="$(stub_host "$dir")"
+  local first_open_port=""
+  for p in $ports; do
+    is_open="$(python3 -c "
+import json
+d=json.load(open('$dir/scenario.json'))
+for e in d['endpoints']:
+    if e['port']==$p:
+        print('yes' if e.get('open',True) else 'no')
+")"
+    if [ "$is_open" = "yes" ] && [ -z "$first_open_port" ]; then first_open_port="$p"; fi
+  done
+  [ -n "$first_open_port" ] || first_open_port="$(echo "$ports" | awk '{print $1}')"
+
+  if ! health_gate "$first_open_port"; then
+    health_gate_fail_msg
+    log "--- stub.log ---"; cat "$dir/stub.log" >&2
+    cmd_down "$run_id" >/dev/null 2>&1
+    exit 5
+  fi
+  if [ "$do_tg" = 1 ]; then
+    if ! docker exec "$CONTAINER" python3 -c "
+import urllib.request,sys
+try:
+    r=urllib.request.urlopen('http://127.0.0.1:$tg_port/__health',timeout=5)
+    sys.exit(0 if r.status==200 else 1)
+except Exception:
+    sys.exit(1)
+"; then
+      log "fangrig: telegram stub unreachable from inside $CONTAINER (same trap as F2/F3, see README)."
+      cmd_down "$run_id" >/dev/null 2>&1
+      exit 5
+    fi
+  fi
+
+  # ---- optional: synthetic provider key (F7) -----------------------------
+  if [ "$with_key" = 1 ]; then
+    local canary; canary="$(canary_for "$run_id")"
+    api POST "/api/providers/$LLM_ROLE/key" "{\"key\":\"$canary\"}" >/dev/null
+  fi
+
+  # ---- optional: telegram channel wiring (F8) ----------------------------
+  if [ "$do_tg" = 1 ]; then
+    cp "$CONFIG" "$dir/config.toml.orig"
+    state_write "$dir" "config_orig=\"$dir/config.toml.orig\""
+    local tg_token tg_default_agent
+    tg_token="$(python3 -c "import json;print(json.load(open('$dir/scenario.json'))['telegram'].get('token','424242:FANGRIG-fake-token-do-not-reuse'))")"
+    tg_default_agent="$(python3 -c "import json;print(json.load(open('$dir/scenario.json'))['telegram'].get('default_agent','assistant'))")"
+    python3 - "$CONFIG" "$tg_token" "$tg_port" "$tg_default_agent" <<'PY'
+import re, sys
+path, token, port, agent = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+s = open(path).read()
+s = re.sub(r"(?ms)^\[channels\.telegram\].*?(?=^\[|\Z)", "", s)
+s += ('\n[channels.telegram]\nbot_token_env = "%s"\n'
+      'poll_interval_secs = 1\napi_url = "http://127.0.0.1:%s"\n'
+      'default_agent = "%s"\n' % (token, port, agent))
+open(path, "w").write(s)
+PY
+    api POST /api/channels/reload '{}' >/dev/null
+  fi
+
+  # ---- selftest (unless disabled) ---------------------------------------
+  if [ "$do_selftest" = 1 ]; then
+    if ! cmd_selftest "$run_id"; then
+      log "fangrig: selftest failed — tearing the run back down (evidence stays in $dir)."
+      cmd_down "$run_id"
+      exit 6
+    fi
+  fi
+
+  # ---- summary -------------------------------------------------------
+  echo
+  echo "scenario : $scen_name   run_id: $run_id"
+  echo "endpoints:"
+  python3 -c "
+import json
+d = json.load(open('$dir/scenario.json'))
+for e in d.get('endpoints', []):
+    state = 'open' if e.get('open', True) else 'closed at start'
+    print('  %-10s http://127.0.0.1:%d%s   (%s)' % (e['role'], e['port'], e['prefix'], state))
+"
+  [ -n "$tg_port" ] && echo "  telegram   http://127.0.0.1:$tg_port   (fake Bot API, only reachable from inside $CONTAINER unless --net bridge)"
+  echo "journal  : $dir/journal.jsonl"
+  [ "$do_tg" = 1 ] && echo "tg journal: $dir/tg-journal.jsonl"
+  echo "next: fangrig agent probe && fangrig say probe \"hi\""
+}
+
+# ============================================================ down =======
+cmd_down() {
+  local run_id="${1:-}"
+  local dir=""
+  if [ -n "$run_id" ]; then
+    dir="$RUN_ROOT/$run_id"
+  elif [ -L "$CURRENT_LINK" ]; then
+    dir="$(readlink -f "$CURRENT_LINK")"
+  fi
+
+  # ---- 1. agents: everything named fangrig-* (state + safety-net sweep) --
+  local agents_json
+  agents_json="$(api GET /api/agents 2>/dev/null || echo '[]')"
+  echo "$agents_json" | python3 -c "
+import json, sys
+try:
+    agents = json.load(sys.stdin)
+except Exception:
+    agents = []
+for a in agents:
+    if isinstance(a, dict) and str(a.get('name','')).startswith('fangrig-'):
+        print(a['id'] + ' ' + a['name'])
+" | while read -r id name; do
+    [ -n "$id" ] || continue
+    api DELETE "/api/agents/$id/uninstall" >/dev/null 2>&1
+    log "fangrig: uninstalled agent $name ($id)"
+  done
+  local wsroot; wsroot="$(dirname "$CONFIG")/workspaces"
+  if [ -d "$wsroot" ]; then
+    for w in "$wsroot"/fangrig-*; do
+      [ -e "$w" ] || continue
+      case "$(dirname "$w")" in
+        "$wsroot") rm -rf "$w"; log "fangrig: removed workspace $w" ;;
+      esac
+    done
+  fi
+
+  # ---- 2. provider key ----------------------------------------------------
+  local with_key="false"
+  [ -n "$dir" ] && with_key="$(state_get "$dir" with_key)"
+  if [ "$with_key" = "true" ]; then
+    api DELETE "/api/providers/$LLM_ROLE/key" >/dev/null 2>&1
+    local still
+    still="$(api GET /api/providers 2>/dev/null | python3 -c "
+import json,sys
+try:
+    ps = json.load(sys.stdin)
+except Exception:
+    ps = []
+print('present' if any(isinstance(p,dict) and p.get('name')=='$LLM_ROLE' and p.get('has_key') for p in ps) else 'absent')
+" 2>/dev/null)"
+    log "fangrig: provider key for '$LLM_ROLE' after cleanup: ${still:-unknown}"
+  fi
+
+  # ---- 3. telegram config restore ------------------------------------------
+  local cfg_orig="null"
+  [ -n "$dir" ] && cfg_orig="$(state_get "$dir" config_orig)"
+  if [ -n "$cfg_orig" ] && [ "$cfg_orig" != "null" ] && [ -f "$cfg_orig" ]; then
+    cp "$cfg_orig" "$CONFIG"
+    api POST /api/channels/reload '{}' >/dev/null 2>&1
+    log "fangrig: restored $CONFIG from $cfg_orig"
+  fi
+
+  # ---- 4. stub containers --------------------------------------------------
+  # `docker rm -f` on a name that doesn't exist exits 0 and prints nothing
+  # (idempotent by design) — it only prints the name on an actual removal —
+  # so gate the log line on non-empty output, not on exit code, or every
+  # re-run of `down` claims to have removed containers it never found.
+  {
+    if [ -n "$dir" ] && [ -f "$dir/state.json" ]; then
+      python3 -c "
+import json
+d = json.load(open('$dir/state.json'))
+for c in d.get('stub_containers', []):
+    print(c)
+"
+    fi
+    # safety-net sweep, always: catches interrupted runs with no state.json
+    docker ps -aq --filter "name=^/fangrig-llm-" --filter "name=^/fangrig-tg-" 2>/dev/null
+  } | sort -u | while read -r c; do
+    [ -n "$c" ] || continue
+    removed="$(docker rm -f "$c" 2>/dev/null)"
+    [ -n "$removed" ] && log "fangrig: removed container $removed"
+  done
+
+  # ---- 5. bridge network ----------------------------------------------------
+  local net_name="null"
+  [ -n "$dir" ] && net_name="$(state_get "$dir" network_name)"
+  {
+    [ -n "$net_name" ] && [ "$net_name" != "null" ] && printf '%s\n' "$net_name"
+    docker network ls --format '{{.Name}}' 2>/dev/null | grep -E '^fangrig-net-'
+  } | sort -u | while read -r n; do
+    [ -n "$n" ] || continue
+    docker network disconnect "$n" "$CONTAINER" >/dev/null 2>&1
+    docker network rm "$n" >/dev/null 2>&1 && log "fangrig: removed network $n"
+  done
+
+  # ---- 6. verify --------------------------------------------------------
+  local leftover=0
+  for p in 8971 8972 8973 8974 8975 8976 8977 8978 8979 8981; do
+    if ! port_free_in_container "$p"; then
+      log "fangrig: WARNING port $p still bound inside $CONTAINER"
+      leftover=1
+    fi
+  done
+  local health; health="$(curl -sS -m 10 "$BASE_URL/api/health" 2>/dev/null)"
+  echo "$health" | grep -q '"status":"ok"' || log "fangrig: WARNING $BASE_URL/api/health did not answer ok: $health"
+
+  [ -n "$dir" ] && echo "run evidence kept at: $dir"
+  [ "$leftover" = 0 ] && log "fangrig: down complete."
+}
+
+# =========================================================== agent =======
+cmd_agent() {
+  [ $# -ge 1 ] || die "usage: fangrig agent <name> [--fallback] [--tools t1,t2]"
+  local name="$1"; shift
+  local with_fallback=0 tools=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --fallback) with_fallback=1; shift ;;
+      --tools) tools="$2"; shift 2 ;;
+      *) die "unknown flag: $1" ;;
+    esac
+  done
+  local dir; dir="$(run_dir)"
+  local scen="$dir/scenario.json"
+  [ -f "$scen" ] || die "no scenario for the current run at $scen" 3
+
+  local primary_url fallback_url
+  primary_url="$(python3 -c "
+import json
+d=json.load(open('$scen'))
+for e in d['endpoints']:
+    if e['role']=='primary':
+        print('http://127.0.0.1:%d%s' % (e['port'], e['prefix']))
+        break
+")"
+  [ -n "$primary_url" ] || die "scenario has no 'primary' role" 3
+  if [ "$with_fallback" = 1 ]; then
+    fallback_url="$(python3 -c "
+import json
+d=json.load(open('$scen'))
+for e in d['endpoints']:
+    if e['role']=='fallback':
+        print('http://127.0.0.1:%d%s' % (e['port'], e['prefix']))
+        break
+")"
+    [ -n "$fallback_url" ] || die "scenario has no 'fallback' role (--fallback needs one)" 3
+  fi
+
+  # JSON array syntax is valid TOML array syntax too — no conversion needed.
+  local tools_toml="[]"
+  [ -n "$tools" ] && tools_toml="$(python3 -c "import json,sys;print(json.dumps(sys.argv[1].split(',')))" "$tools")"
+
+  local agent_name="fangrig-$name"
+  local manifest
+  manifest="$(cat <<TOML
+name = "$agent_name"
+version = "1.0.0"
+description = "FANG-52 harness probe"
+author = "fang-tests"
+module = "builtin:chat"
+schedule = "reactive"
+priority = "Normal"
+tags = ["fangrig"]
+
+[model]
+provider = "$LLM_ROLE"
+model = "adv-primary"
+max_tokens = 128
+temperature = 0.0
+system_prompt = "Answer with the number only."
+api_key_env = "$PROVIDER_KEY_ENV_DEFAULT"
+base_url = "$primary_url"
+TOML
+)"
+  if [ "$with_fallback" = 1 ]; then
+    manifest="$manifest
+$(cat <<TOML
+
+[[fallback_models]]
+provider = "$LLM_ROLE"
+model = "adv-fallback"
+api_key_env = "$PROVIDER_KEY_ENV_DEFAULT"
+base_url = "$fallback_url"
+TOML
+)"
+  fi
+  manifest="$manifest
+$(cat <<TOML
+
+[capabilities]
+tools = $tools_toml
+TOML
+)"
+
+  local body; body="$(python3 -c "import json,sys;print(json.dumps({'manifest_toml': sys.stdin.read()}))" <<<"$manifest")"
+  local resp; resp="$(api POST /api/agents "$body")"
+  local id; id="$(python3 -c "
+import json,sys
+try:
+    d=json.loads(sys.argv[1])
+    print(d.get('agent_id',''))
+except Exception:
+    print('')
+" "$resp")"
+  if [ -z "$id" ]; then
+    log "fangrig: spawn failed: $resp"
+    return 1
+  fi
+  state_write "$dir" "agents=$(python3 -c "
+import json
+try:
+    cur = json.load(open('$dir/state.json')).get('agents', [])
+except Exception:
+    cur = []
+cur.append({'id': '$id', 'name': '$agent_name'})
+print(json.dumps(cur))
+")"
+
+  # If this run wired a Telegram channel, its default_agent could not
+  # resolve at `up` time (this agent didn't exist yet) — channel_bridge.rs
+  # resolves default_agent by NAME exactly once, at reload, and silently
+  # falls through to whatever the kernel's persisted bindings say otherwise
+  # (found the hard way: two runs' messages both landed on the real
+  # 'assistant' agent, real LLM, real cost, before this fix). Reload again
+  # now that the name exists, so the router actually picks it up.
+  if [ "$(state_get "$dir" tg)" = "true" ]; then
+    api POST /api/channels/reload '{}' >/dev/null
+    log "fangrig: re-reloaded channels so Telegram's default_agent picks up $agent_name"
+  fi
+  echo "$id"
+}
+
+resolve_agent_id() {
+  local dir="$1" name_or_id="$2"
+  if printf '%s' "$name_or_id" | grep -qE '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'; then
+    printf '%s' "$name_or_id"
+    return 0
+  fi
+  local wanted="$name_or_id"
+  case "$wanted" in fangrig-*) ;; *) wanted="fangrig-$wanted" ;; esac
+  api GET /api/agents | python3 -c "
+import json,sys
+agents = json.load(sys.stdin)
+for a in agents:
+    if a.get('name') == '$wanted':
+        print(a['id']); break
+"
+}
+
+# ============================================================= say =======
+cmd_say() {
+  [ $# -ge 2 ] || die "usage: fangrig say <agent> \"<text>\" [--stream]"
+  local agent="$1" text="$2"; shift 2
+  local stream=0
+  while [ $# -gt 0 ]; do
+    case "$1" in --stream) stream=1; shift ;; *) die "unknown flag: $1" ;; esac
+  done
+  local dir; dir="$(run_dir)"
+  local id; id="$(resolve_agent_id "$dir" "$agent")"
+  [ -n "$id" ] || die "no such agent: $agent (run 'fangrig agent $agent' first)" 3
+
+  api POST "/api/agents/$id/session/reset" '{}' >/dev/null
+
+  local body; body="$(python3 -c "import json,sys;print(json.dumps({'message': sys.argv[1]}))" "$text")"
+  if [ "$stream" = 1 ]; then
+    local k; k="$(api_key)"
+    curl -sS -N -m 600 -X POST -H 'Content-Type: application/json' \
+         ${k:+-H "Authorization: Bearer $k"} -d "$body" \
+         "$BASE_URL/api/agents/$id/message/stream"
+    echo
+  else
+    api_msg "/api/agents/$id/message" "$body"
+    echo
+  fi
+}
+
+# ========================================================== tg-send ======
+cmd_tg_send() {
+  [ $# -ge 1 ] || die "usage: fangrig tg-send <index|kind> [--file <name>]"
+  local arg="$1"; shift
+  local file=""
+  while [ $# -gt 0 ]; do
+    case "$1" in --file) file="$2"; shift 2 ;; *) die "unknown flag: $1" ;; esac
+  done
+  local dir; dir="$(run_dir)"
+  local scen="$dir/scenario.json"
+  local tg_port; tg_port="$(state_get "$dir" tg_port)"
+  [ -n "$tg_port" ] && [ "$tg_port" != "null" ] || die "current run has no telegram stub (fangrig up ... --tg)" 3
+
+  local spec
+  if printf '%s' "$arg" | grep -qE '^[0-9]+$'; then
+    spec="$(python3 -c "
+import json
+d = json.load(open('$scen'))
+print(json.dumps(d['telegram']['updates'][$arg]))
+")"
+  else
+    spec="$(python3 -c "
+import json
+spec = {'kind': '$arg'}
+file = '$file'
+if file:
+    spec['file_name'] = file
+print(json.dumps(spec))
+")"
+  fi
+
+  local host; host="$(tg_stub_host "$dir")"
+  local out; out="$(stub_exec "$host" "$tg_port" "/__push" "POST" "" <<<"$spec")"
+  echo "$out" | tail -n +2
+}
+
+# =========================================================== journal =====
+cmd_journal() {
+  local mode="table"
+  [ $# -ge 1 ] && case "$1" in --json) mode="json" ;; --raw) mode="raw" ;; --rollup) mode="json" ;; esac
+  local dir; dir="$(run_dir)"
+  local jfile="$dir/journal.jsonl"
+  [ -f "$jfile" ] || die "no journal at $jfile" 3
+
+  if [ "$mode" = "raw" ]; then
+    cat "$jfile"
+    return 0
+  fi
+
+  local llm_port; llm_port="$(python3 -c "
+import json
+d = json.load(open('$dir/scenario.json'))
+ps = sorted(e['port'] for e in d.get('endpoints', []))
+print(ps[0] if ps else '')
+")"
+  local host; host="$(stub_host "$dir")"
+  local live=""
+  if [ -n "$llm_port" ]; then
+    live="$(stub_exec "$host" "$llm_port" "/__journal" "GET" 2>/dev/null | tail -n +2)"
+  fi
+
+  if [ "$mode" = "json" ]; then
+    if [ -n "$live" ] && printf '%s' "$live" | python3 -c "import json,sys;json.loads(sys.stdin.read())" 2>/dev/null; then
+      printf '%s\n' "$live"
+    else
+      log "fangrig: stub not reachable — computing rollup from journal.jsonl instead"
+      python3 -c "
+import json
+counts, models, streams, statuses = {}, {}, {}, {}
+for line in open('$jfile'):
+    line = line.strip()
+    if not line:
+        continue
+    r = json.loads(line)
+    if r.get('phase') != 'done' or r.get('step_type') == 'selftest_diagnostic':
+        continue
+    role = r.get('endpoint')
+    counts[role] = counts.get(role, 0) + 1
+    m = r.get('model')
+    if m:
+        models[m] = models.get(m, 0) + 1
+    if r.get('stream'):
+        streams[role] = streams.get(role, 0) + 1
+    s = str(r.get('status'))
+    statuses[s] = statuses.get(s, 0) + 1
+print(json.dumps({'counts': counts, 'models': models, 'streams': streams, 'statuses': statuses}, indent=2))
+"
+    fi
+    return 0
+  fi
+
+  # human table
+  if [ -n "$live" ] && printf '%s' "$live" | python3 -c "import json,sys;json.loads(sys.stdin.read())" 2>/dev/null; then
+    printf '%s' "$live" | python3 -c "
+import json, sys
+d = json.loads(sys.stdin.read())
+print('run_id   :', d.get('run_id'))
+print('scenario :', d.get('scenario'))
+print('counts   :', d.get('counts'))
+print('models   :', d.get('models'))
+print('streams  :', d.get('streams'))
+print('statuses :', d.get('statuses'))
+print('log:')
+for line in d.get('log', []):
+    print('  ' + line)
+"
+  else
+    log "fangrig: stub not reachable, printing raw journal.jsonl summary"
+    python3 -c "
+import json
+n = 0
+for line in open('$jfile'):
+    line = line.strip()
+    if not line:
+        continue
+    r = json.loads(line)
+    if r.get('phase') != 'done':
+        continue
+    n += 1
+    print('#%d %-10s status=%s step=%s model=%s stream=%s' % (
+        n, r.get('endpoint'), r.get('status'), r.get('step_type'), r.get('model'), r.get('stream')))
+"
+  fi
+}
+
+# =========================================================== status ======
+cmd_status() {
+  if [ -L "$CURRENT_LINK" ]; then
+    local dir; dir="$(readlink -f "$CURRENT_LINK")"
+    echo "current run: $dir"
+    [ -f "$dir/state.json" ] && cat "$dir/state.json"
+  else
+    echo "no current run"
+  fi
+  echo
+  echo "fangrig-* containers:"
+  docker ps -a --filter 'name=^/fangrig-' --format '  {{.Names}}\t{{.Status}}' 2>/dev/null
+  echo "fangrig-* networks:"
+  docker network ls --format '{{.Name}}' 2>/dev/null | grep -E '^fangrig-net-' | sed 's/^/  /'
+}
+
+# ========================================================== selftest =====
+cmd_selftest() {
+  local run_id="${1:-}"
+  local dir; dir="$(run_dir "$run_id")"
+  [ -f "$dir/scenario.json" ] || die "no scenario.json in $dir — is a run up?" 3
+  local ok=1
+
+  local llm_port; llm_port="$(python3 -c "
+import json
+d=json.load(open('$dir/scenario.json'))
+ps=sorted(e['port'] for e in d.get('endpoints',[]) if e.get('open',True))
+print(ps[0] if ps else (sorted(e['port'] for e in d.get('endpoints',[]))[0] if d.get('endpoints') else ''))
+")"
+  [ -n "$llm_port" ] || { log "selftest: FAIL scenario has no endpoints"; return 6; }
+  local host; host="$(stub_host "$dir")"
+
+  # -- 5. reachability gate (do this first; nothing else works without it) --
+  if health_gate "$llm_port"; then
+    log "selftest: PASS reachability gate (port $llm_port)"
+  else
+    health_gate_fail_msg
+    log "selftest: FAIL reachability gate"
+    return 6
+  fi
+
+  # -- 1/2. positive+negative journal control -----------------------------
+  local marker="SELFTEST-MUST-APPEAR-$run_id"
+  local body; body="$(python3 -c "import json;print(json.dumps({'model':'$marker','messages':[{'role':'user','content':'probe'}]}))")"
+  local prefix; prefix="$(python3 -c "
+import json
+d=json.load(open('$dir/scenario.json'))
+for e in d['endpoints']:
+    if e['port']==$llm_port:
+        print(e['prefix']); break
+")"
+  stub_exec "$host" "$llm_port" "$prefix/chat/completions" POST <<<"$body" >/dev/null
+
+  sleep 0.2
+  if grep -E "$marker" "$dir/journal.jsonl" >/dev/null 2>&1; then
+    log "selftest: PASS positive journal control"
+  else
+    log "selftest: FAIL positive journal control — probe model name never showed up in journal.jsonl"
+    ok=0
+  fi
+  if grep -E "SELFTEST-MUST-NOT-APPEAR" "$dir/journal.jsonl" >/dev/null 2>&1; then
+    log "selftest: FAIL negative journal control — found a string that was never sent"
+    ok=0
+  else
+    log "selftest: PASS negative journal control"
+  fi
+
+  # -- 3. secret redaction control ------------------------------------------
+  local decoy_body; decoy_body="$(python3 -c "import json;print(json.dumps({'model':'selftest-redaction','messages':[{'role':'user','content':'probe'}]}))")"
+  local resp; resp="$(stub_exec "$host" "$llm_port" "$prefix/chat/completions" POST "NOT-THE-CANARY" <<<"$decoy_body")"
+  sleep 0.2
+  if grep -F "NOT-THE-CANARY" "$dir/journal.jsonl" >/dev/null 2>&1; then
+    log "selftest: FAIL secret redaction — the raw bearer token landed in journal.jsonl"
+    ok=0
+  elif printf '%s' "$resp" | grep -F "NOT-THE-CANARY" >/dev/null 2>&1; then
+    log "selftest: FAIL secret redaction — the raw bearer token landed in the stub's own response body"
+    ok=0
+  else
+    log "selftest: PASS secret redaction control"
+  fi
+
+  # -- 4. streaming control --------------------------------------------------
+  local stream_body; stream_body="$(python3 -c "import json;print(json.dumps({'model':'selftest-stream','stream':True,'messages':[{'role':'user','content':'probe'}]}))")"
+  local sresp; sresp="$(stub_exec "$host" "$llm_port" "$prefix/chat/completions" POST <<<"$stream_body" | tail -n +2)"
+  local n_data; n_data="$(printf '%s' "$sresp" | grep -c '^data: ')"
+  if printf '%s' "$sresp" | grep -q '^data: \[DONE\]' && [ "$n_data" -ge 3 ]; then
+    log "selftest: PASS streaming control ($n_data data: events)"
+  else
+    log "selftest: FAIL streaming control (n_data=$n_data, DONE present=$(printf '%s' "$sresp" | grep -c '\[DONE\]'))"
+    ok=0
+  fi
+
+  # -- 6. isolation control ---------------------------------------------------
+  if grep -Ei 'api\.telegram\.org|api\.openai\.com|anthropic\.com' "$dir/journal.jsonl" "$dir/tg-journal.jsonl" 2>/dev/null | grep -qv '^$'; then
+    log "selftest: FAIL isolation control — an external domain string showed up in a journal"
+    ok=0
+  else
+    log "selftest: PASS isolation control (journals clean)"
+  fi
+  if grep -E 'urlopen|requests\.(get|post)|socket\.connect|http\.client' "$HARNESS_DIR/llm_stub.py" "$HARNESS_DIR/tg_stub.py" >/dev/null 2>&1; then
+    log "selftest: FAIL isolation control — stub source contains an outbound-call primitive"
+    ok=0
+  else
+    log "selftest: PASS isolation control (stub source makes no outbound calls)"
+  fi
+
+  # -- 7. scenario validation --------------------------------------------------
+  if python3 - "$HARNESS_DIR/scenarios" <<'PY'
+import json, glob, os, sys
+root = sys.argv[1]
+bad = []
+for f in sorted(glob.glob(os.path.join(root, "*.json"))):
+    try:
+        d = json.load(open(f))
+    except Exception as e:
+        bad.append((f, "invalid json: %s" % e)); continue
+    roles = set()
+    for ep in d.get("endpoints", []):
+        r = ep.get("role")
+        if not r or r in roles:
+            bad.append((f, "missing/duplicate role %r" % r)); continue
+        roles.add(r)
+        p = ep.get("port")
+        if not isinstance(p, int) or not (8971 <= p <= 8979):
+            bad.append((f, "role %s: port %r out of range" % (r, p)))
+        steps = ep.get("steps", [])
+        default = ep.get("default_step", {"type": "text"})
+        for i, s in enumerate(steps):
+            if s.get("type") == "tool_call":
+                if "name" not in s:
+                    bad.append((f, "role %s: tool_call step missing name" % r))
+                if i + 1 >= len(steps) and default.get("type") != "text":
+                    bad.append((f, "role %s: trailing tool_call needs a text default_step" % r))
+for f, msg in bad:
+    print("%s: %s" % (f, msg))
+sys.exit(1 if bad else 0)
+PY
+  then
+    log "selftest: PASS scenario validation (all scenarios/*.json)"
+  else
+    log "selftest: FAIL scenario validation"
+    ok=0
+  fi
+
+  [ "$ok" = 1 ]
+}
+
+# =================================================================== main ==
+[ $# -ge 1 ] || usage 1
+cmd="$1"; shift
+case "$cmd" in
+  up)        cmd_up "$@" ;;
+  down)      cmd_down "$@" ;;
+  agent)     cmd_agent "$@" ;;
+  say)       cmd_say "$@" ;;
+  tg-send)   cmd_tg_send "$@" ;;
+  journal)   cmd_journal "$@" ;;
+  status)    cmd_status "$@" ;;
+  selftest)  cmd_selftest "$@" ;;
+  -h|--help) usage 0 ;;
+  *) log "unknown command: $cmd"; usage 1 ;;
+esac

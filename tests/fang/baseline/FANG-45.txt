@@ -1,0 +1,170 @@
+FANG-45 baseline — file_read silently truncates large files
+=============================================================
+Recon task: measure and record the red state, do not fix.
+Produced by: tests/fang/FANG-45.sh, run against staging (127.0.0.1:4201),
+daemon version 0.6.9, agent AgentRAG2 (model ark/glm-5.2, provider
+y7router, fell back to hyperfusion/openai-gpt-oss-120b on 429s — the
+context-budget math is driven by the model's configured context window,
+131K tokens, and is unaffected by which model actually served the call).
+
+File under test: workspace tx/7dbed435066d495fbaa3c7f1f57c35fb.txt
+  (same file cited in the sprint-2 acceptance finding — 117517 bytes,
+   the "78 483 из 117 517 байт (66,8%)" number from that finding.)
+
+
+1. WHERE THE LIMIT IS
+----------------------
+Not in file_read itself. tool_file_read() (tool_runner.rs:1379-1388) does
+a plain `tokio::fs::read_to_string(&resolved)` — no cap, no streaming, no
+partial read. Its tool schema (tool_runner.rs:571-580) takes ONLY "path":
+
+    571:            name: "file_read".to_string(),
+    572-            description: "Read the contents of a file. Paths are relative to the agent workspace.".to_string(),
+    573-            input_schema: serde_json::json!({
+    574-                "type": "object",
+    575-                "properties": {
+    576-                    "path": { "type": "string", "description": "The file path to read" }
+    577-                },
+    578-                "required": ["path"]
+    579-            }),
+    580-        },
+
+No offset, no limit, no range — grep confirms no such key anywhere in the
+schema.
+
+The actual cut is applied generically to EVERY tool result (not just
+file_read) one layer up, in crates/openfang-runtime/src/context_budget.rs:
+
+    per_result_cap()        = 30% of context_window_tokens, at an assumed
+                               2.0 chars/token for "dense" tool content
+                             ⇒ cap_chars ≈ 0.6 * context_window_tokens
+
+    truncate_tool_result_dynamic(content, budget):
+      if content.len() <= cap: return unchanged
+      else: cut at the last '\n' at-or-before cap, append:
+        "[TRUNCATED: result was {orig_len} chars, showing first {kept}
+          (budget: {30}% of {window/1000}K context window)]"
+
+Call site: crates/openfang-runtime/src/agent_loop.rs:1053 (and the
+duplicate loop body at :2320), executed right after every tool call
+completes, before the tool_result is appended to message history.
+
+For this agent's 131K-token context window:
+    cap = 0.30 * 131072 * 2.0 = 78643.2 chars (~78643)
+Observed kept length after the newline-boundary backoff: 78483 chars
+(consistent with the code walking back to the nearest '\n', losing up to
+~200 chars below the raw cap).
+
+
+2. IS THE CUT DISCLOSED TO THE AGENT — YES, textually, in the raw tool
+   result. NO, effectively, by the time it reaches the caller.
+------------------------------------------------------------------------
+Raw tool_result content actually placed in the LLM's context window
+(pulled straight from the on-disk session .jsonl,
+workspaces/AgentRAG2/sessions/5f509b41-8a50-4ee8-a46f-33c4a7991fb8.jsonl):
+
+  tool_result content length actually in prompt: 78579 bytes (44485
+    unicode chars — the two numbers differ because Rust's String::len()
+    used everywhere in the truncation code, and quoted by the marker's
+    "N chars" text, is a BYTE count, not a codepoint count; this
+    transcript is largely Cyrillic, ~1.77 bytes/char average, so 78483
+    truncation bytes decode to ~44389 displayed characters. All figures
+    below are BYTES, matching the marker's own units and wc -c.)
+  truncation marker found in raw tool_result:
+    [TRUNCATED: result was 117517 chars, showing first 78483
+     (budget: 30% of 131K context window)]
+  actual visible prefix before the marker: 78483 bytes = 66.8% of the
+    real 117517-byte file
+  last 200 bytes actually delivered to the model, decoded for display
+  (repr):
+    'у других. Следующий тогда вопрос Юлия задаёт. А если цветочный
+    магазин приобретен уже готовый полгода назад.'
+
+  (minor, separate observation: the marker's own label is wrong — it
+  says "117517 chars" / "showing first 78483" but both numbers are
+  bytes, not chars; the real character count of this file is 66486. Not
+  the main defect, but it means anyone reading the marker text at face
+  value — human or model — gets the wrong idea of how much text, not
+  just how many bytes, was cut.)
+
+So the marker IS present verbatim in what the model reads. The model's
+own hidden reasoning (captured in the same session log) shows it notices
+this correctly:
+
+  assistant turn 1 (thinking): "The file is huge, truncated. We need the
+    length of the result (the entire file). The tool returned truncated
+    output due to budget. It says result was 117517 chars, showing first
+    78483 (budget...). So ..."
+
+  assistant turn 2 (thinking): "Again truncated. We need last 200
+    characters. Perhaps we can read the file with a different tool: maybe
+    file_read supports offset? Not indicated. Alternative: Use file_list
+    to see file size? Not help[ful]..."
+    → confirms independently, from the model's own investigation, that
+      there is no offset/limit workaround (matches section 1/4).
+
+  final answer returned to the caller, BOTH independent runs:
+    Run A (2026-08-13, pre-existing session): "117517\n…[не удалось
+      получить последние 200 символов из‑за ограничения инструмента]"
+    Run B (2026-08-14, tests/fang/FANG-45.sh, fresh run):     "117517  \n
+      (не удалось получить последние 200 символов из‑за ограничения
+      инструмента)"
+
+Both times the model reports 117517 — the file's TOTAL size, taken
+straight out of the truncation marker's "result was N chars" clause — as
+if that many characters had reached it, when it actually received 78483.
+It never states 78483, never states 66.8%, never tells the caller "I only
+got part of the file." The disclosure exists in the raw tool output but
+does not survive translation into the model's own summary. From the
+calling side (a user, or another agent consuming this agent's answer)
+this is indistinguishable from file_read silently returning a partial
+file: the reported byte count is wrong and overstates completeness by
+39034 bytes (33.2%).
+
+
+3. MEASURED ON STAND
+----------------------
+  REAL_FILE_BYTES              = 117517
+  ACTUALLY DELIVERED TO MODEL  = 78483   (66.8% of the file)
+  MODEL'S CLAIMED CHAR COUNT   = 117517  (100% — WRONG, off by 39034 bytes / 33.2 pp)
+  DISCLOSURE MARKER PRESENT IN RAW TOOL OUTPUT = yes
+  DISCLOSURE SURVIVES INTO THE AGENT'S FINAL ANSWER = no
+  LAST 200 CHARS: model could not produce them (correctly declined rather
+    than confabulate — reduces risk of a silent wrong answer here, but
+    still means the tail of the file is unreachable by any means from
+    inside the agent).
+
+Two independent runs (2026-08-13 pre-existing session + 2026-08-14 fresh
+run via FANG-45.sh) reproduce identical numbers: cap=78643 theoretical,
+78483 actual kept length, 117517 real size, 66.8% delivered, model
+self-reports 117517 both times.
+
+
+4. IS THERE A WORKAROUND (offset/limit)?
+------------------------------------------
+No. Confirmed two ways:
+  a) Source: file_read's JSON schema (tool_runner.rs:571-580) has exactly
+     one parameter, "path". No offset/limit/range key exists anywhere in
+     builtin_tool_definitions() for file_read.
+  b) Live: the model itself searched for a workaround in its own
+     reasoning ("maybe file_read supports offset? Not indicated") and
+     found none, then gave up on retrieving the last 200 characters
+     rather than guessing.
+This is itself part of the defect: even an agent that correctly detects
+the truncation has no tool-level way to page through the rest of a large
+file. The only escape hatches are shell_exec (if the hand allows it,
+e.g. `tail`/`sed` on the workspace file) or splitting the source file
+before ingestion — neither is file_read's job, and neither is suggested
+anywhere in file_read's own description or error text.
+
+
+Reproduction: tests/fang/FANG-45.sh
+Full raw run output of the reproduction above: this file's numbers were
+generated live from that script's stdout on 2026-08-14T00:46:53Z against
+staging (127.0.0.1:4201, daemon 0.6.9) — three tool calls across two
+separate script runs (00:43:42Z and 00:46:53Z) all produced byte-identical
+78483/117517 numbers — plus the pre-existing session capture from
+2026-08-13 kept for corroboration
+(workspaces/AgentRAG2/sessions/5f509b41-8a50-4ee8-a46f-33c4a7991fb8.jsonl
+on the staging data volume, lines 0-5, appended to by this script's runs
+as lines 6-9).

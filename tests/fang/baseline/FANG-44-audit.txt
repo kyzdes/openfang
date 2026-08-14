@@ -1,0 +1,166 @@
+FANG-44 — full audit of openfang-channels/src for credential-in-reqwest-URL leaks
+Date: 2026-08-14
+Scope: every file in crates/openfang-channels/src/ (45 adapter/support files).
+Method: grepped every format!()-built URL for a credential var interpolated into
+the query string or path (`grep -rnE '\?[a-zA-Z_]*(token|secret|key|password)=\{|
+&[a-zA-Z_]*(token|secret|key|password)=\{'`), then hand-verified each hit's
+call path up to wherever the resulting `reqwest::Error` (or the `Box<dyn Error>`
+it becomes via `?`) is displayed with `{}`/`{e}` — that Display impl includes
+the request URL verbatim unless `.without_url()` was called on it first.
+Cross-checked: no adapter anywhere in the crate uses reqwest's `.query(&[...])`
+builder or `scheme://user:pass@host` URLs to carry credentials (both would be
+the same class of leak in a different shape) — grepped for both, zero hits.
+
+Only `crates/openfang-channels/src/telegram.rs` calls `.without_url()`
+(as `redact_reqwest_error`, fixed under FANG-39 last sprint). No other file in
+the crate calls `.without_url()` anywhere — grep for it crate-wide returns the
+single telegram.rs hit.
+
+=====================================================================
+LEAKING — credential embedded in a reqwest URL, unredacted, reachable to a log
+=====================================================================
+
+adapter      | file:line          | credential  | call site           | sink (unredacted `{e}`/`{}`)
+-------------|--------------------|-------------|----------------------|----------------------------------
+dingtalk     | dingtalk.rs:99     | access_token| build_send_url(),   | bridge.rs:618
+             | (build_send_url)   | + hmac sign | used by send():284  | error!("Failed to send response: {e}")
+             |                    |             |                      | (dingtalk has no validate()/HTTP
+             |                    |             |                      |  call in start() — webhook mode —
+             |                    |             |                      |  so send() is its ONLY leak path)
+-------------|--------------------|-------------|----------------------|----------------------------------
+messenger    | messenger.rs:71    | page_token  | validate(), called   | channel_bridge.rs:1826
+             | (validate)         |             | from start():272    | error!("Failed to start {name} bridge: {e}")
+messenger    | messenger.rs:96    | page_token  | api_send_message(),  | bridge.rs:618 (via send():368)
+             | (api_send_message) |             | called from send()  |
+messenger    | messenger.rs:133   | page_token  | api_send_action()   | NOT reachable — result discarded:
+             | (api_send_action)  |             |                      | `let _ = self.client.post(&url)...`
+             |                    |             |                      | (messenger.rs:145). Dead-end, but
+             |                    |             |                      | still worth stripping for consistency.
+messenger    | messenger.rs:375   | page_token  | send() Image branch  | bridge.rs:618
+             |                    |             | (attachment upload)  |
+-------------|--------------------|-------------|----------------------|----------------------------------
+flock        | flock.rs:64        | bot_token   | validate(), called   | channel_bridge.rs:1826
+             | (validate)         |             | from start():248    |
+             |                    |             |                      | NOTE: flock's actual send path
+             |                    |             |                      | (api_send_message/api_send_rich_
+             |                    |             |                      | message, lines 89/129) puts the
+             |                    |             |                      | token in the JSON BODY, not the
+             |                    |             |                      | URL — so send() itself does not
+             |                    |             |                      | leak via reqwest::Error. validate()
+             |                    |             |                      | is Flock's only URL-embedded leak.
+-------------|--------------------|-------------|----------------------|----------------------------------
+threema      | threema.rs:67      | secret      | validate(), called   | channel_bridge.rs:1826
+             | (validate,         |             | from start():192    |
+             | "?from=..&secret=")|             |                      | NOTE: same pattern as Flock —
+             |                    |             |                      | api_send_message (line 88) sends
+             |                    |             |                      | `secret` as a form FIELD, not in
+             |                    |             |                      | the URL, so send() is clean of
+             |                    |             |                      | this specific leak. validate() is
+             |                    |             |                      | Threema's only URL-embedded leak.
+-------------|--------------------|-------------|----------------------|----------------------------------
+wecom        | wecom.rs:259       | corpsecret  | get_token(), called  | bridge.rs:618 (via send_text():294
+             | (get_token,        |             | from send_text():299| -> send():560+ propagates `?`)
+             | "?corpid=..        |             |                      | Also reachable if get_token() is
+             | &corpsecret=..")   |             |                      | ever called from a startup path in
+             |                    |             |                      | the future — currently lazy/on-send
+             |                    |             |                      | only, so channel_bridge.rs:1826 is
+             |                    |             |                      | NOT currently a path for this one.
+wecom        | wecom.rs:301       | access_token| send_text()          | bridge.rs:618
+             | ("?access_token=") |(short-lived)|                      | Short-lived derived token, but
+             |                    |             |                      | still authenticates as the bot for
+             |                    |             |                      | its lifetime (up to 7200s) — same
+             |                    |             |                      | class of leak, lower blast radius.
+-------------|--------------------|-------------|----------------------|----------------------------------
+gotify       | gotify.rs:65       | client_token| validate(), called   | channel_bridge.rs:1826
+             | (validate,         |             | from start():159    |
+             | "?token=")         |             |                      |
+gotify       | gotify.rs:97       | app_token   | api_send_message(),  | bridge.rs:618 (via send():308)
+             | ("?token=")        |             | called from send()  |
+gotify       | gotify.rs:86       | client_token| build_ws_url(), used | NOT a reqwest leak — this URL is
+             | (build_ws_url,     |             | by tokio_tungstenite | handed to `tokio_tungstenite::
+             | "?token=")         |             | ::connect_async()    | connect_async()` (gotify.rs:175),
+             |                    |             |                      | and its error is logged at
+             |                    |             |                      | gotify.rs:180 as
+             |                    |             |                      | `warn!("...connection failed: {e}"...)`
+             |                    |             |                      | — `{e}` is the tungstenite error,
+             |                    |             |                      | which does NOT carry the URL, and
+             |                    |             |                      | the log line does not interpolate
+             |                    |             |                      | `ws_url` itself. This one IS clean.
+             |                    |             |                      | -> This is exactly the nuance the
+             |                    |             |                      | sprint-2 commit message got wrong:
+             |                    |             |                      | it said "gotify doesn't leak because
+             |                    |             |                      | it's tungstenite" and used that to
+             |                    |             |                      | excuse the WHOLE file, but gotify
+             |                    |             |                      | ALSO makes two plain reqwest calls
+             |                    |             |                      | (validate + api_send_message,
+             |                    |             |                      | lines 65 and 97) that do leak.
+
+=====================================================================
+CONFIRMED CLEAN — re-checked, not just taken on the prior report's word
+=====================================================================
+
+- discord.rs   — auth is exclusively `.header("Authorization", format!("Bot {token}"))`
+                 (lines 116/143/162/187/228 and others); no token ever appears in a URL.
+- slack.rs     — bot_token and app_token both go through `.header("Authorization",
+                 format!("Bearer {token}"))` (lines 113-114/154-155/436); the one
+                 WS-endpoint call (get_socket_mode_url, line 430) also uses the header,
+                 not a query string.
+- matrix.rs    — the one `format!("&since={token}")` (matrix.rs:417) interpolates the
+                 *sync cursor* (`since_token`, a pagination position Matrix hands back),
+                 not the access token — verified by reading the surrounding sync loop
+                 (matrix.rs:390-420); the real access token is sent via
+                 `.bearer_auth(&token)` (matrix.rs:177) elsewhere. Genuinely clean.
+- whatsapp.rs  — access_token exclusively via `.bearer_auth(&*self.access_token)`
+                 (lines 101/134/264/291/318); never appears in a URL.
+- mqtt.rs      — username/password go through the MQTT client's own
+                 `set_credentials()` at the protocol level (MQTT CONNECT packet, not
+                 HTTP/reqwest at all) — this whole leak class does not apply to mqtt.rs.
+- dingtalk_stream.rs — a DIFFERENT DingTalk transport from dingtalk.rs (Stream Mode
+                 over a gateway WS connection). Its two reqwest calls (get_token:70,
+                 batchSend:133/get_ws_endpoint:375) all send app_key/app_secret/
+                 access-token via JSON body or the `x-acs-dingtalk-access-token`
+                 header, never in the URL. The resulting WS URL does carry a `ticket`
+                 query param (line 388), but that ticket is a single-use handshake
+                 credential obtained via an already-authenticated call, not the
+                 long-lived app_secret, and it's consumed by tungstenite (not reqwest).
+                 Clean of this specific bug class.
+- feishu.rs, reddit.rs, bluesky.rs, teams.rs — all use `.bearer_auth(&token)` for the
+                 REST calls found by the audit grep; no credential-in-URL hits in
+                 these files at all (the only format! hits were unrelated JSON/error
+                 messages, listed under the broad grep above for completeness).
+
+=====================================================================
+SUMMARY — metric ДО
+=====================================================================
+
+Adapters with at least one *currently reachable* (i.e. actually logged
+somewhere with `{}`/`{e}` and no `.without_url()`) credential-in-URL leak: 6
+  dingtalk, messenger, flock, threema, wecom, gotify
+
+Adapters where a leak exists in source but is provably unreachable
+(result discarded before any log call): +0 files, 1 call site
+  messenger.rs:133 (api_send_action) — dead leak, still worth fixing for
+  defense-in-depth since a future refactor could easily start checking that
+  Result.
+
+Total distinct file:line sites with a credential embedded in a reqwest URL
+and no `.without_url()` anywhere in the crate: 9
+  dingtalk.rs:99, messenger.rs:71/96/133/375, flock.rs:64, threema.rs:67,
+  wecom.rs:259/301, gotify.rs:65/97
+  (gotify.rs:86 excluded from this count — real credential in the URL, but the
+   consumer is tungstenite/WS and the actual log line at gotify.rs:180 does not
+   leak it; listed above for completeness since the URL itself is still
+   sensitive if ever logged elsewhere.)
+
+Previously recognized-but-unclosed per the sprint-2 review (dingtalk.rs:99,
+messenger.rs:71/96/133/375, flock.rs:64, threema.rs:67, wecom.rs:259/301):
+CONFIRMED, all 9 still unpatched — same lines as of this audit.
+Sprint-2 commit's claim "gotify doesn't leak" (blamed on tungstenite):
+CONFIRMED WRONG — gotify.rs:65 (validate) and gotify.rs:97 (api_send_message)
+leak via plain reqwest calls the commit message didn't account for; only the
+WS reconnect path (gotify.rs:86/180) is actually clean.
+
+Fix pattern already exists and is proven in-tree: telegram.rs's
+`redact_reqwest_error()` (`e.without_url()`) — same fix needs to be lifted into
+dingtalk.rs, messenger.rs, flock.rs, threema.rs, wecom.rs, and gotify.rs at the
+9 (or, being thorough, 10 including messenger.rs:133) sites above.

@@ -1,0 +1,50 @@
+=== FANG-43 · Telegram bot token leaks into the LLM prompt via file URLs ===
+date              : 2026-08-14T00:41:03Z
+target            : http://127.0.0.1:4201  (container openfang-staging)
+daemon version    : 0.6.9
+image             : sha256:843089540db7
+fake token        : 424242:FANG43-fake-token-do-not-reuse-ABCDEF
+target agent      : assistant  (session dir: /var/lib/docker/volumes/openfang-staging-data/_data/workspaces/assistant/sessions)
+
+--- POST /api/channels/reload (attach poller to the stub) ---
+{"started":["telegram"],"status":"ok"}
+
+--- waiting for the agent turn to complete (LLM call + session write) ---
+stub log (stderr, should show getMe/getUpdates/getFile/file download):
+REQ /bot424242:FANG43-fake-token-do-not-reuse-ABCDEF/getMe
+  -> method=getMe
+REQ /bot424242:FANG43-fake-token-do-not-reuse-ABCDEF/deleteWebhook
+  -> method=deleteWebhook
+REQ /bot424242:FANG43-fake-token-do-not-reuse-ABCDEF/setMyCommands
+  -> method=setMyCommands
+REQ /bot424242:FANG43-fake-token-do-not-reuse-ABCDEF/getUpdates
+  -> method=getUpdates
+  -> delivering probe document update
+REQ /bot424242:FANG43-fake-token-do-not-reuse-ABCDEF/getFile
+  -> method=getFile
+REQ /bot424242:FANG43-fake-token-do-not-reuse-ABCDEF/sendChatAction
+  -> method=sendChatAction
+REQ /bot424242:FANG43-fake-token-do-not-reuse-ABCDEF/setMessageReaction
+  -> method=setMessageReaction
+REQ /bot424242:FANG43-fake-token-do-not-reuse-ABCDEF/setMessageReaction
+  -> method=setMessageReaction
+REQ /bot424242:FANG43-fake-token-do-not-reuse-ABCDEF/getUpdates
+  -> method=getUpdates
+REQ /bot424242:FANG43-fake-token-do-not-reuse-ABCDEF/sendChatAction
+  -> method=sendChatAction
+REQ /bot424242:FANG43-fake-token-do-not-reuse-ABCDEF/getUpdates
+  -> method=getUpdates
+REQ /bot424242:FANG43-fake-token-do-not-reuse-ABCDEF/sendChatAction
+  -> method=sendChatAction
+REQ /bot424242:FANG43-fake-token-do-not-reuse-ABCDEF/sendMessage
+  -> method=sendMessage
+REQ /bot424242:FANG43-fake-token-do-not-reuse-ABCDEF/setMessageReaction
+  -> method=setMessageReaction
+
+--- session file: /var/lib/docker/volumes/openfang-staging-data/_data/workspaces/assistant/sessions/db8a2014-ed59-4cd0-8ce2-7b7ee6247a64.jsonl ---
+11:{"timestamp":"2026-08-14T00:41:13.513983438+00:00","role":"user","content":"[From: Probe (tg_id:555555)] [User sent a file (probe-secret-exfil.pdf): http://127.0.0.1:8097/file/bot424242:FANG43-fake-token-do-not-reuse-ABCDEF/documents/probe-secret-exfil.pdf]"}
+
+FANG43_FULL_TOKEN_OCCURRENCES_IN_SESSION=2   # want 0
+RESULT: RED — the full bot token is present verbatim in the on-disk session
+        (and therefore was sent verbatim inside the LLM chat-completion request).
+restored /var/lib/docker/volumes/openfang-staging-data/_data/config.toml

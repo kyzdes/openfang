@@ -569,11 +569,13 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
         // --- Filesystem tools ---
         ToolDefinition {
             name: "file_read".to_string(),
-            description: "Read the contents of a file. Paths are relative to the agent workspace.".to_string(),
+            description: "Read the contents of a file. Paths are relative to the agent workspace. Large files may be truncated to fit the model's context budget; the response says so explicitly and reports the real byte counts. Use 'offset' and 'limit' (byte positions) to page through a file that was truncated or to read a specific slice.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "path": { "type": "string", "description": "The file path to read" }
+                    "path": { "type": "string", "description": "The file path to read" },
+                    "offset": { "type": "integer", "minimum": 0, "description": "Byte offset to start reading from (default: 0). Use the 'next offset' reported by a truncated read to continue." },
+                    "limit": { "type": "integer", "minimum": 1, "description": "Maximum number of bytes to read starting at offset (default: read to end of file, subject to the overall tool-result budget)." }
                 },
                 "required": ["path"]
             }),
@@ -1382,9 +1384,55 @@ async fn tool_file_read(
 ) -> Result<String, String> {
     let raw_path = input["path"].as_str().ok_or("Missing 'path' parameter")?;
     let resolved = resolve_file_path(raw_path, workspace_root)?;
-    tokio::fs::read_to_string(&resolved)
+    let content = tokio::fs::read_to_string(&resolved)
         .await
-        .map_err(|e| format!("Failed to read file: {e}"))
+        .map_err(|e| format!("Failed to read file: {e}"))?;
+
+    let total_len = content.len(); // bytes, matching what the truncation layer measures
+    let offset = input["offset"].as_u64().map(|v| v as usize).unwrap_or(0);
+    let limit = input["limit"].as_u64().map(|v| v as usize);
+
+    if offset > total_len {
+        return Err(format!(
+            "offset {offset} is past the end of the file ({total_len} bytes total)"
+        ));
+    }
+
+    // Clamp the requested window to valid UTF-8 char boundaries so we never
+    // panic or emit a mangled multi-byte character at the edges.
+    let mut start = offset;
+    while start > 0 && !content.is_char_boundary(start) {
+        start -= 1;
+    }
+    let mut end = match limit {
+        Some(l) => start.saturating_add(l).min(total_len),
+        None => total_len,
+    };
+    while end > start && !content.is_char_boundary(end) {
+        end -= 1;
+    }
+
+    let slice = &content[start..end];
+    let is_partial = start > 0 || end < total_len;
+
+    if !is_partial {
+        return Ok(slice.to_string());
+    }
+
+    let remaining = total_len - end;
+    let mut note = format!(
+        "[file_read: returned bytes {start}-{end} of {total_len} total in this file ({} bytes)",
+        end - start
+    );
+    if remaining > 0 {
+        note.push_str(&format!(
+            "; {remaining} bytes remain. Call file_read again with offset={end} to continue reading.]"
+        ));
+    } else {
+        note.push_str("; this is the end of the file.]");
+    }
+
+    Ok(format!("{note}\n\n{slice}"))
 }
 
 async fn tool_file_write(
@@ -3958,6 +4006,84 @@ mod tests {
         .await;
         assert!(result.is_error);
         assert!(result.content.contains("traversal"));
+    }
+
+    #[tokio::test]
+    async fn test_file_read_full_file_no_truncation_marker() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path();
+        tokio::fs::write(root.join("small.txt"), "hello world")
+            .await
+            .unwrap();
+        let result = tool_file_read(&serde_json::json!({"path": "small.txt"}), Some(root)).await;
+        let content = result.expect("expected Ok for a full read");
+        assert_eq!(content, "hello world");
+        assert!(
+            !content.contains("[file_read:"),
+            "a full, untruncated read must not carry a truncation marker, got: {content}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_file_read_limit_marks_partial_read_with_real_counts() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path();
+        // 26 bytes total.
+        let body = "abcdefghijklmnopqrstuvwxyz";
+        tokio::fs::write(root.join("big.txt"), body).await.unwrap();
+
+        let result = tool_file_read(
+            &serde_json::json!({"path": "big.txt", "limit": 10}),
+            Some(root),
+        )
+        .await;
+        let content = result.expect("expected Ok for a partial read");
+
+        // Must disclose that this is a partial read, with the real byte
+        // counts (10 returned, 26 total, 16 remaining) and how to continue.
+        assert!(
+            content.contains("[file_read:"),
+            "a partial read must carry a truncation marker, got: {content}"
+        );
+        assert!(content.contains("10"), "should report bytes returned: {content}");
+        assert!(content.contains("26"), "should report the true total size: {content}");
+        assert!(content.contains("offset=10"), "should tell the caller how to continue: {content}");
+        // The actual file bytes for the requested window must still be present verbatim.
+        assert!(content.contains("abcdefghij"));
+        assert!(!content.contains("klmnopqrstuvwxyz"));
+    }
+
+    #[tokio::test]
+    async fn test_file_read_offset_continues_where_limit_left_off() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path();
+        let body = "abcdefghijklmnopqrstuvwxyz";
+        tokio::fs::write(root.join("big.txt"), body).await.unwrap();
+
+        let result = tool_file_read(
+            &serde_json::json!({"path": "big.txt", "offset": 10}),
+            Some(root),
+        )
+        .await;
+        let content = result.expect("expected Ok");
+        assert!(content.contains("klmnopqrstuvwxyz"));
+        assert!(
+            content.contains("this is the end of the file"),
+            "reading to the true end should say so: {content}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_file_read_offset_past_end_errors() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path();
+        tokio::fs::write(root.join("small.txt"), "hi").await.unwrap();
+        let result = tool_file_read(
+            &serde_json::json!({"path": "small.txt", "offset": 999}),
+            Some(root),
+        )
+        .await;
+        assert!(result.is_err());
     }
 
     #[tokio::test]

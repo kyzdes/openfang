@@ -1386,9 +1386,7 @@ async fn call_with_retry(
                                         provider: Some(fb.provider.clone()),
                                         // sanitized, not raw: this reaches the caller in
                                         // calls[].reason and onward to SSE/WS/openai-compat.
-                                        reason: Some(
-                                            classified.sanitized_message.clone(),
-                                        ),
+                                        reason: Some(classified.sanitized_message.clone()),
                                     },
                                 ));
                             }
@@ -1583,9 +1581,7 @@ async fn stream_with_retry(
                                         provider: Some(fb.provider.clone()),
                                         // sanitized, not raw: this reaches the caller in
                                         // calls[].reason and onward to SSE/WS/openai-compat.
-                                        reason: Some(
-                                            classified.sanitized_message.clone(),
-                                        ),
+                                        reason: Some(classified.sanitized_message.clone()),
                                     },
                                 ));
                             }
@@ -5672,7 +5668,10 @@ mod tests {
             "each row carries the count from its own response"
         );
         assert_eq!(
-            finished.iter().map(|c| u64::from(c.tool_calls)).sum::<u64>(),
+            finished
+                .iter()
+                .map(|c| u64::from(c.tool_calls))
+                .sum::<u64>(),
             4,
             "turn total is the sum of real calls, not iterations - 1 (which would be 2)"
         );
@@ -5691,7 +5690,10 @@ mod tests {
         );
         set_last_tool_calls(&mut calls, 7);
         let finished = finish_calls(&mut calls);
-        assert_eq!(finished[0].tool_calls, 7, "finish_calls must not rewrite it");
+        assert_eq!(
+            finished[0].tool_calls, 7,
+            "finish_calls must not rewrite it"
+        );
     }
 
     /// A mixed turn: the substitute served call 0, the primary came back for
@@ -5906,19 +5908,11 @@ mod tests {
 
         // Token conservation: the rows must add up to the turn's own totals.
         assert_eq!(
-            result
-                .calls
-                .iter()
-                .map(|c| c.input_tokens)
-                .sum::<u64>(),
+            result.calls.iter().map(|c| c.input_tokens).sum::<u64>(),
             result.total_usage.input_tokens
         );
         assert_eq!(
-            result
-                .calls
-                .iter()
-                .map(|c| c.output_tokens)
-                .sum::<u64>(),
+            result.calls.iter().map(|c| c.output_tokens).sum::<u64>(),
             result.total_usage.output_tokens
         );
         assert_eq!(result.total_usage.input_tokens, 303);

@@ -550,7 +550,10 @@ impl TelegramAdapter {
                     }
                 }
                 Err(e) => {
-                    debug!("Telegram setMessageReaction error: {}", redact_reqwest_error(e));
+                    debug!(
+                        "Telegram setMessageReaction error: {}",
+                        redact_reqwest_error(e)
+                    );
                 }
                 _ => {}
             }

@@ -164,8 +164,10 @@ impl LlmDriver for FallbackDriver {
                     return Ok((response, self.report_for(i, target, inner, &first_error)));
                 }
                 Err(e) => {
-                    let rate_limited =
-                        matches!(e, LlmError::RateLimited { .. } | LlmError::Overloaded { .. });
+                    let rate_limited = matches!(
+                        e,
+                        LlmError::RateLimited { .. } | LlmError::Overloaded { .. }
+                    );
                     warn!(
                         driver_index = i,
                         model = %asked_for,
@@ -215,8 +217,10 @@ impl LlmDriver for FallbackDriver {
                     return Ok((response, self.report_for(i, target, inner, &first_error)));
                 }
                 Err(e) => {
-                    let rate_limited =
-                        matches!(e, LlmError::RateLimited { .. } | LlmError::Overloaded { .. });
+                    let rate_limited = matches!(
+                        e,
+                        LlmError::RateLimited { .. } | LlmError::Overloaded { .. }
+                    );
                     warn!(
                         driver_index = i,
                         model = %asked_for,
@@ -492,7 +496,12 @@ mod tests {
     async fn test_primary_answers_reports_nothing_substituted() {
         let driver = FallbackDriver::with_targets(vec![
             target(Arc::new(OkDriver), "", "", "hyperfusion"),
-            target(Arc::new(FailDriver), "adv-fallback", "adv-fallback", "hyperfusion"),
+            target(
+                Arc::new(FailDriver),
+                "adv-fallback",
+                "adv-fallback",
+                "hyperfusion",
+            ),
         ]);
         let (response, report) = driver.complete_reported(test_request()).await.unwrap();
         assert_eq!(response.text(), "OK");
@@ -508,7 +517,12 @@ mod tests {
         // Three entries: the report must carry entry 0's error (the model that
         // was asked for), not entry 1's.
         let driver = FallbackDriver::with_targets(vec![
-            target(Arc::new(TaggedFailDriver("ERR-ZERO")), "", "", "hyperfusion"),
+            target(
+                Arc::new(TaggedFailDriver("ERR-ZERO")),
+                "",
+                "",
+                "hyperfusion",
+            ),
             target(
                 Arc::new(TaggedFailDriver("ERR-ONE")),
                 "mid",
@@ -619,7 +633,12 @@ mod tests {
 
         let driver = Arc::new(FallbackDriver::with_targets(vec![
             target(Arc::new(PickyDriver), "", "", "hyperfusion"),
-            target(Arc::new(OkDriver), "adv-fallback", "adv-fallback", "hyperfusion"),
+            target(
+                Arc::new(OkDriver),
+                "adv-fallback",
+                "adv-fallback",
+                "hyperfusion",
+            ),
         ]));
 
         let a = {

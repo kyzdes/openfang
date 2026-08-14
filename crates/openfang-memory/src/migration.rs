@@ -345,8 +345,14 @@ fn migrate_v9(conn: &Connection) -> Result<(), rusqlite::Error> {
     // NULL provider on legacy rows is deliberate: the manifest may have changed
     // since, so any value we invented would be a guess presented as a fact.
     for (column, ddl) in [
-        ("provider", "ALTER TABLE usage_events ADD COLUMN provider TEXT"),
-        ("turn_id", "ALTER TABLE usage_events ADD COLUMN turn_id TEXT"),
+        (
+            "provider",
+            "ALTER TABLE usage_events ADD COLUMN provider TEXT",
+        ),
+        (
+            "turn_id",
+            "ALTER TABLE usage_events ADD COLUMN turn_id TEXT",
+        ),
         (
             "call_index",
             "ALTER TABLE usage_events ADD COLUMN call_index INTEGER",

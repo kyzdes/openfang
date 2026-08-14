@@ -3080,10 +3080,7 @@ impl OpenFangKernel {
             });
         }
 
-        let catalog = self
-            .model_catalog
-            .read()
-            .unwrap_or_else(|e| e.into_inner());
+        let catalog = self.model_catalog.read().unwrap_or_else(|e| e.into_inner());
         for call in result.calls.iter_mut() {
             call.cost_usd = MeteringEngine::estimate_cost_with_catalog(
                 &catalog,

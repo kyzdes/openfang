@@ -229,7 +229,10 @@ mod tests {
                 .sum()
         };
         assert_eq!(sum("input_tokens"), json["input_tokens"].as_f64().unwrap());
-        assert_eq!(sum("output_tokens"), json["output_tokens"].as_f64().unwrap());
+        assert_eq!(
+            sum("output_tokens"),
+            json["output_tokens"].as_f64().unwrap()
+        );
         assert!((sum("cost_usd") - json["cost_usd"].as_f64().unwrap()).abs() < 1e-12);
 
         // The substituted call names both models; the primary's call names one.

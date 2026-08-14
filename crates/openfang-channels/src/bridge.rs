@@ -1036,7 +1036,9 @@ async fn dispatch_message(
             // prompt. The agent doesn't need the URL to know a photo arrived
             // and failed to download.
             match caption {
-                Some(c) => format!("[User sent a photo, but it could not be downloaded]\nCaption: {c}"),
+                Some(c) => {
+                    format!("[User sent a photo, but it could not be downloaded]\nCaption: {c}")
+                }
                 None => "[User sent a photo, but it could not be downloaded]".to_string(),
             }
         }

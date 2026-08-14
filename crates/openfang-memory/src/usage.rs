@@ -530,11 +530,25 @@ mod tests {
         let agent_id = AgentId::new();
 
         store
-            .record(&UsageRecord::turn(agent_id, "claude-haiku", 100, 50, 0.001, 2))
+            .record(&UsageRecord::turn(
+                agent_id,
+                "claude-haiku",
+                100,
+                50,
+                0.001,
+                2,
+            ))
             .unwrap();
 
         store
-            .record(&UsageRecord::turn(agent_id, "claude-sonnet", 500, 200, 0.01, 1))
+            .record(&UsageRecord::turn(
+                agent_id,
+                "claude-sonnet",
+                500,
+                200,
+                0.01,
+                1,
+            ))
             .unwrap();
 
         let summary = store.query_summary(Some(agent_id)).unwrap();

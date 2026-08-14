@@ -45,7 +45,14 @@ impl LlmCounters {
             .map(|e| {
                 let (agent, provider, model) = e.key();
                 let (calls, input, output) = *e.value();
-                (*agent, provider.clone(), model.clone(), calls, input, output)
+                (
+                    *agent,
+                    provider.clone(),
+                    model.clone(),
+                    calls,
+                    input,
+                    output,
+                )
             })
             .collect()
     }
@@ -624,7 +631,14 @@ mod tests {
         };
 
         engine
-            .record(&UsageRecord::turn(agent_id, "claude-haiku", 100, 50, 0.001, 0))
+            .record(&UsageRecord::turn(
+                agent_id,
+                "claude-haiku",
+                100,
+                50,
+                0.001,
+                0,
+            ))
             .unwrap();
 
         assert!(engine.check_quota(agent_id, &quota).is_ok());
@@ -640,7 +654,14 @@ mod tests {
         };
 
         engine
-            .record(&UsageRecord::turn(agent_id, "claude-sonnet", 10000, 5000, 0.05, 0))
+            .record(&UsageRecord::turn(
+                agent_id,
+                "claude-sonnet",
+                10000,
+                5000,
+                0.05,
+                0,
+            ))
             .unwrap();
 
         let result = engine.check_quota(agent_id, &quota);
@@ -660,7 +681,14 @@ mod tests {
 
         // Even with high usage, a zero limit means no enforcement
         engine
-            .record(&UsageRecord::turn(agent_id, "claude-opus", 100000, 50000, 100.0, 0))
+            .record(&UsageRecord::turn(
+                agent_id,
+                "claude-opus",
+                100000,
+                50000,
+                100.0,
+                0,
+            ))
             .unwrap();
 
         assert!(engine.check_quota(agent_id, &quota).is_ok());
@@ -917,11 +945,21 @@ mod tests {
         snapshot.sort_by(|a, b| a.2.cmp(&b.2));
         assert_eq!(snapshot.len(), 2);
         assert_eq!(
-            (snapshot[0].2.as_str(), snapshot[0].3, snapshot[0].4, snapshot[0].5),
+            (
+                snapshot[0].2.as_str(),
+                snapshot[0].3,
+                snapshot[0].4,
+                snapshot[0].5
+            ),
             ("adv-fallback", 1, 202, 22)
         );
         assert_eq!(
-            (snapshot[1].2.as_str(), snapshot[1].3, snapshot[1].4, snapshot[1].5),
+            (
+                snapshot[1].2.as_str(),
+                snapshot[1].3,
+                snapshot[1].4,
+                snapshot[1].5
+            ),
             ("adv-primary", 1, 101, 11)
         );
         for (_, provider, model, _, input, _) in &snapshot {
@@ -952,7 +990,11 @@ mod tests {
         }
         let after = engine.counters.snapshot_per_model();
 
-        assert_eq!(before.len(), after.len(), "no new label sets on a repeat turn");
+        assert_eq!(
+            before.len(),
+            after.len(),
+            "no new label sets on a repeat turn"
+        );
         for (agent, provider, model, calls, input, output) in before {
             let now = after
                 .iter()

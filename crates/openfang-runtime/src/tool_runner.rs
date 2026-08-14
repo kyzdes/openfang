@@ -4045,9 +4045,18 @@ mod tests {
             content.contains("[file_read:"),
             "a partial read must carry a truncation marker, got: {content}"
         );
-        assert!(content.contains("10"), "should report bytes returned: {content}");
-        assert!(content.contains("26"), "should report the true total size: {content}");
-        assert!(content.contains("offset=10"), "should tell the caller how to continue: {content}");
+        assert!(
+            content.contains("10"),
+            "should report bytes returned: {content}"
+        );
+        assert!(
+            content.contains("26"),
+            "should report the true total size: {content}"
+        );
+        assert!(
+            content.contains("offset=10"),
+            "should tell the caller how to continue: {content}"
+        );
         // The actual file bytes for the requested window must still be present verbatim.
         assert!(content.contains("abcdefghij"));
         assert!(!content.contains("klmnopqrstuvwxyz"));
@@ -4077,7 +4086,9 @@ mod tests {
     async fn test_file_read_offset_past_end_errors() {
         let tmp = tempfile::TempDir::new().unwrap();
         let root = tmp.path();
-        tokio::fs::write(root.join("small.txt"), "hi").await.unwrap();
+        tokio::fs::write(root.join("small.txt"), "hi")
+            .await
+            .unwrap();
         let result = tool_file_read(
             &serde_json::json!({"path": "small.txt", "offset": 999}),
             Some(root),

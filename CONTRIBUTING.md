@@ -106,6 +106,26 @@ After building, verify your local setup:
 cargo run -- doctor
 ```
 
+### CI on this fork (`ours`)
+
+`.github/workflows/ci.yml` is upstream's workflow and stays scoped to upstream's `main`
+branch — we don't push there and don't edit that file for fork-specific needs.
+`.github/workflows/fork-ci.yml` is ours: it triggers on pushes to `ours` and on pull
+requests targeting `ours`, and runs `cargo fmt --check`, `cargo clippy --workspace
+--all-targets -- -D warnings`, and `cargo test --workspace` on ubuntu-latest. See the
+comments at the top of that file for what was deliberately left out (OS matrix,
+`cargo audit`, install-script smoke test, upstream's secrets-scan job) and why.
+
+**`fork-ci.yml` does not make shell-based repro scripts (e.g. `run.sh`) runnable in
+CI.** Scripts in this repo that reproduce a bug against a live OpenFang instance
+generally assume a running Docker daemon, a specific named container, a host path
+bind-mounted into it, and/or `nsenter` into that container's namespace. None of that
+exists on a GitHub-hosted `ubuntu-latest` runner — there's no long-lived named
+container for the script to exec into and no host volume to point at. If you need a
+repro script to actually execute inside CI (not just be checked into the repo), that
+requires a self-hosted runner configured with this project's docker/volume layout.
+That is not what `fork-ci.yml` provides, and building it is separate follow-up work.
+
 ---
 
 ## Code Style

@@ -1,0 +1,88 @@
+name: Fork CI (ours)
+
+# This is a SEPARATE workflow from the upstream `ci.yml`. It intentionally does not
+# touch `ci.yml`, whose triggers are still scoped to `main` (the upstream mirror we
+# don't push to). `ours` is our real branch and had no CI at all before this file —
+# 4,116 lines across 35 .rs files and 53 new tests were unguarded for three sprints.
+on:
+  push:
+    branches: [ours]
+  pull_request:
+    branches: [ours]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # ── fmt / clippy / test, ubuntu-only ───────────────────────────────────────
+  #
+  # Deliberately NOT included, and why:
+  #
+  # - {ubuntu, macos, windows} matrix with `-D warnings`: this fork has never once
+  #   built on macOS or Windows. Any cfg-gated import that's unused off-Linux would
+  #   turn the whole run red on day one, with no ceiling on how much platform-specific
+  #   cleanup that drags in before the gate is ever green. Ubuntu-only until someone
+  #   actually needs the other targets.
+  #
+  # - `cargo audit`: our Cargo.lock (227KB) is pinned to v0.6.9 — openssl vendored,
+  #   wasmtime 43, rusqlite bundled. `cargo audit` is a moving target checked against
+  #   whatever advisories exist on the day CI happens to run; it would fail PRs for
+  #   advisories in pinned deps nobody touched, with no code change to make green.
+  #
+  # - `install-smoke`: upstream's job curls https://openfang.sh/install, which is
+  #   upstream's own deploy endpoint, not ours. A break there is upstream's CI to run
+  #   red, not ours.
+  #
+  # - a `secrets` job: upstream's version passes `--exclude-paths` including `.git/`,
+  #   which would NOT have caught the real key leak this fork already had (the leak
+  #   was in tracked file contents, not git internals — excluding `.git/` does nothing
+  #   for that class of leak). Rather than ship a scanner with known-blind config, this
+  #   is left out. Add one later, but only after it's been proven against a canary
+  #   (a fake key committed to a scratch branch) BEFORE relying on its "clean" result —
+  #   see the ERE/BRE quantifier trap that made a real key read as clean here before.
+  check:
+    name: fmt + clippy + test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+
+      # Tauri desktop crate is a workspace member; --workspace pulls it in even for
+      # fmt/clippy/test on non-GUI crates, so these system libs are needed to link.
+      - name: Install Tauri system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf
+
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+
+      - name: cargo clippy -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: cargo test
+        run: cargo test --workspace
+
+# ─────────────────────────────────────────────────────────────────────────────
+# NOTE on shell-repro scripts (run.sh and friends):
+#
+# This workflow does NOT make run.sh, or any other shell-based repro script that
+# depends on a running docker daemon, a named container, a host bind-mounted volume,
+# or `nsenter`, usable in CI. GitHub-hosted ubuntu-latest runners have none of that
+# available in the way this repo's repro scripts assume (no long-lived named
+# container to exec into, no host path identical to the one the repro script
+# expects, no nsenter into another container's namespace). If a repro script needs
+# to actually run in CI rather than just exist in the repo, that requires a
+# self-hosted runner wired to this project's docker/volume setup — that is separate
+# work, not something this workflow provides. See CONTRIBUTING.md.
+# ─────────────────────────────────────────────────────────────────────────────

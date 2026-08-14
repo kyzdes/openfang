@@ -74,6 +74,20 @@ impl AgentScheduler {
         }
     }
 
+    /// Record tool calls made by an agent within the current turn.
+    ///
+    /// `count` is the per-turn tool call total (the sum of `LlmCall::tool_calls`
+    /// across a turn's calls) — the only place this counter is fed from.
+    pub fn record_tool_calls(&self, agent_id: AgentId, count: u64) {
+        if count == 0 {
+            return;
+        }
+        if let Some(mut tracker) = self.usage.get_mut(&agent_id) {
+            tracker.reset_if_expired();
+            tracker.tool_calls += count;
+        }
+    }
+
     /// Check if an agent has exceeded its quota.
     pub fn check_quota(&self, agent_id: AgentId) -> OpenFangResult<()> {
         let quota = match self.quotas.get(&agent_id) {
@@ -168,6 +182,34 @@ mod tests {
         );
         let (tokens, _) = scheduler.get_usage(id).unwrap();
         assert_eq!(tokens, 150);
+    }
+
+    #[test]
+    fn test_record_tool_calls() {
+        // FANG-50: after N tool calls are recorded, the counter reads N —
+        // regression test for a counter that was declared, zeroed, and read
+        // but never incremented anywhere.
+        let scheduler = AgentScheduler::new();
+        let id = AgentId::new();
+        scheduler.register(id, ResourceQuota::default());
+
+        scheduler.record_tool_calls(id, 2);
+        scheduler.record_tool_calls(id, 3);
+
+        let (_, tool_calls) = scheduler.get_usage(id).unwrap();
+        assert_eq!(tool_calls, 5);
+    }
+
+    #[test]
+    fn test_record_tool_calls_zero_is_noop() {
+        let scheduler = AgentScheduler::new();
+        let id = AgentId::new();
+        scheduler.register(id, ResourceQuota::default());
+
+        scheduler.record_tool_calls(id, 0);
+
+        let (_, tool_calls) = scheduler.get_usage(id).unwrap();
+        assert_eq!(tool_calls, 0);
     }
 
     #[test]

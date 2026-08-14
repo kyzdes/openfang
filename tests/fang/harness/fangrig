@@ -193,6 +193,11 @@ except Exception:
   if [ "$do_tg" = 1 ]; then
     cp "$CONFIG" "$dir/config.toml.orig"
     state_write "$dir" "config_orig=\"$dir/config.toml.orig\""
+    # Remember WHICH file the copy came from. `down` used to restore into whatever
+    # $CONFIG pointed at when it ran, so a run started against one stand and torn down
+    # with OPENFANG_CONFIG pointing at another wrote the first stand's config — api_key
+    # included — over the second one. That is not hypothetical: it happened during review.
+    state_write "$dir" "config_path=\"$CONFIG\""
     local tg_token tg_default_agent
     tg_token="$(python3 -c "import json;print(json.load(open('$dir/scenario.json'))['telegram'].get('token','424242:FANGRIG-fake-token-do-not-reuse'))")"
     tg_default_agent="$(python3 -c "import json;print(json.load(open('$dir/scenario.json'))['telegram'].get('default_agent','assistant'))")"
@@ -290,12 +295,29 @@ print('present' if any(isinstance(p,dict) and p.get('name')=='$LLM_ROLE' and p.g
   fi
 
   # ---- 3. telegram config restore ------------------------------------------
-  local cfg_orig="null"
-  [ -n "$dir" ] && cfg_orig="$(state_get "$dir" config_orig)"
+  local cfg_orig="null" cfg_path="null"
+  if [ -n "$dir" ]; then
+    cfg_orig="$(state_get "$dir" config_orig)"
+    cfg_path="$(state_get "$dir" config_path)"
+  fi
   if [ -n "$cfg_orig" ] && [ "$cfg_orig" != "null" ] && [ -f "$cfg_orig" ]; then
-    cp "$cfg_orig" "$CONFIG"
-    api POST /api/channels/reload '{}' >/dev/null 2>&1
-    log "fangrig: restored $CONFIG from $cfg_orig"
+    # Restore into the file the copy was taken from, not into $CONFIG as it is now.
+    # When they disagree, refuse and say how to do it by hand: writing one stand's
+    # config over another clobbers a live api_key, and that is how it went wrong once.
+    local target="$cfg_path"
+    if [ -z "$target" ] || [ "$target" = "null" ]; then
+      target="$CONFIG"
+      log "fangrig: WARNING this run predates config_path tracking; restoring into \$CONFIG ($CONFIG)"
+    elif [ "$target" != "$CONFIG" ]; then
+      log "fangrig: REFUSING to restore — this run saved $target, but \$CONFIG is now $CONFIG"
+      log "fangrig: do it yourself if that is what you meant:  cp $cfg_orig $target"
+      target=""
+    fi
+    if [ -n "$target" ]; then
+      cp "$cfg_orig" "$target"
+      api POST /api/channels/reload '{}' >/dev/null 2>&1
+      log "fangrig: restored $target from $cfg_orig"
+    fi
   fi
 
   # ---- 4. stub containers --------------------------------------------------

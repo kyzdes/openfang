@@ -3679,7 +3679,7 @@ pub async fn prometheus_metrics(State(state): State<Arc<AppState>>) -> impl Into
     // per-model truth lives in the `openfang_llm_*` counters below.
     out.push_str("# HELP openfang_tokens_total Total tokens consumed (rolling hourly window, per agent across all models). The provider/model labels describe the agent's configuration; for per-model truth use openfang_llm_tokens_total.\n");
     out.push_str("# TYPE openfang_tokens_total gauge\n");
-    out.push_str("# HELP openfang_tool_calls_total Total tool calls (rolling hourly window).\n");
+    out.push_str("# HELP openfang_tool_calls_total Tool calls requested by the model (rolling hourly window), counted per LLM response. Zero before this build for lack of instrumentation, not lack of tool use; briefly counted iterations-with-tool-use instead, which undercounts whenever a response asks for more than one call.\n");
     out.push_str("# TYPE openfang_tool_calls_total gauge\n");
     let agent_usage: Vec<(String, String, String, u64, u64)> = agents
         .iter()

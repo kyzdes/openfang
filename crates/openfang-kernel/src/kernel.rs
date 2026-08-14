@@ -1969,6 +1969,10 @@ impl OpenFangKernel {
             Ok(result) => {
                 // Record token usage for quota tracking
                 self.scheduler.record_usage(agent_id, &result.total_usage);
+                self.scheduler.record_tool_calls(
+                    agent_id,
+                    result.calls.iter().map(|c| u64::from(c.tool_calls)).sum(),
+                );
 
                 // Update last active time
                 let _ = self.registry.set_state(agent_id, AgentState::Running);
@@ -2070,6 +2074,10 @@ impl OpenFangKernel {
                         kernel_clone
                             .scheduler
                             .record_usage(agent_id, &result.total_usage);
+                        kernel_clone.scheduler.record_tool_calls(
+                            agent_id,
+                            result.calls.iter().map(|c| u64::from(c.tool_calls)).sum(),
+                        );
                         let _ = kernel_clone
                             .registry
                             .set_state(agent_id, AgentState::Running);
@@ -2448,6 +2456,10 @@ impl OpenFangKernel {
                     kernel_clone
                         .scheduler
                         .record_usage(agent_id, &result.total_usage);
+                    kernel_clone.scheduler.record_tool_calls(
+                        agent_id,
+                        result.calls.iter().map(|c| u64::from(c.tool_calls)).sum(),
+                    );
 
                     // Persist usage to database (same as non-streaming path):
                     // one row per LLM call, each booked to the model that

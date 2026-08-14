@@ -270,17 +270,27 @@ pub struct AgentLoopResult {
 
 /// Close out a turn's call log: attribute tool calls and hand the vector over.
 ///
-/// Tool calls are attributed conservatively — 1 to every call but the last —
-/// so the turn total stays exactly `iterations - 1`, the number written before
-/// this grain change. A truthful per-call count (`response.tool_calls.len()`)
-/// would move `summary.total_tool_calls`, and this patch changes no shipped
-/// number.
+/// `tool_calls` is set per call by `set_last_tool_calls` once the response is final, so
+/// this only hands the accumulated rows over.
+///
+/// It used to attribute 1 to every call but the last, keeping the turn total at exactly
+/// `iterations - 1` so no shipped number moved. That was accurate only when a model emits
+/// one tool call per turn. Measured on a model emitting three in a single response: the
+/// turn recorded 1, and nine executed calls across a turn recorded 3. A metric named
+/// `tool_calls` that counts iterations is worse than one that counts nothing, because the
+/// number looks plausible.
 fn finish_calls(calls: &mut Vec<LlmCall>) -> Vec<LlmCall> {
-    let n = calls.len();
-    for (i, c) in calls.iter_mut().enumerate() {
-        c.tool_calls = u32::from(i + 1 < n);
-    }
     std::mem::take(calls)
+}
+
+/// Record how many tool calls the just-finished LLM response actually asked for.
+///
+/// Called after text-based recovery, because a model that emits `<function=…>` in prose has
+/// an empty `tool_calls` at the moment the call is recorded and a populated one afterwards.
+fn set_last_tool_calls(calls: &mut [LlmCall], n: usize) {
+    if let Some(last) = calls.last_mut() {
+        last.tool_calls = n as u32;
+    }
 }
 
 /// Build the accounting row for a finished LLM call.
@@ -652,6 +662,7 @@ pub async fn run_agent_loop(
                 response.content = new_blocks;
             }
         }
+        set_last_tool_calls(&mut calls, response.tool_calls.len());
 
         match response.stop_reason {
             StopReason::EndTurn | StopReason::StopSequence => {
@@ -1952,6 +1963,7 @@ pub async fn run_agent_loop_streaming(
                 response.content = new_blocks;
             }
         }
+        set_last_tool_calls(&mut calls, response.tool_calls.len());
 
         match response.stop_reason {
             StopReason::EndTurn | StopReason::StopSequence => {
@@ -5636,28 +5648,50 @@ mod tests {
     /// The turn total must stay `iterations - 1`, which is the number written
     /// before accounting moved to per-call rows.
     #[test]
-    fn test_finish_calls_keeps_the_turn_tool_call_total() {
-        for iterations in [1usize, 2, 5] {
-            let mut calls: Vec<LlmCall> = Vec::new();
-            for i in 0..iterations {
-                record_call(
-                    &mut calls,
-                    i as u32,
-                    &adv_model(),
-                    &CallReport::default(),
-                    usage(10, 5),
-                );
-            }
-            let finished = finish_calls(&mut calls);
-            let total: u32 = finished.iter().map(|c| c.tool_calls).sum();
-            assert_eq!(
-                total as usize,
-                iterations - 1,
-                "turn of {iterations} iterations must report {} tool calls",
-                iterations - 1
+    fn test_tool_calls_count_what_the_response_asked_for() {
+        // The previous version of this test asserted `total == iterations - 1`, which is what
+        // the code did — so it locked in the undercount instead of guarding against it. A
+        // response asking for three tool calls made the turn report one. The assertion now
+        // follows the responses, not the iteration count.
+        let per_response = [3usize, 1, 0];
+        let mut calls: Vec<LlmCall> = Vec::new();
+        for (i, n) in per_response.iter().enumerate() {
+            record_call(
+                &mut calls,
+                i as u32,
+                &adv_model(),
+                &CallReport::default(),
+                usage(10, 5),
             );
-            assert!(calls.is_empty(), "finish_calls hands the vector over");
+            set_last_tool_calls(&mut calls, *n);
         }
+        let finished = finish_calls(&mut calls);
+        assert_eq!(
+            finished.iter().map(|c| c.tool_calls).collect::<Vec<_>>(),
+            vec![3u32, 1, 0],
+            "each row carries the count from its own response"
+        );
+        assert_eq!(
+            finished.iter().map(|c| u64::from(c.tool_calls)).sum::<u64>(),
+            4,
+            "turn total is the sum of real calls, not iterations - 1 (which would be 2)"
+        );
+        assert!(calls.is_empty(), "finish_calls hands the vector over");
+    }
+
+    #[test]
+    fn test_finish_calls_leaves_recorded_counts_alone() {
+        let mut calls: Vec<LlmCall> = Vec::new();
+        record_call(
+            &mut calls,
+            0,
+            &adv_model(),
+            &CallReport::default(),
+            usage(10, 5),
+        );
+        set_last_tool_calls(&mut calls, 7);
+        let finished = finish_calls(&mut calls);
+        assert_eq!(finished[0].tool_calls, 7, "finish_calls must not rewrite it");
     }
 
     /// A mixed turn: the substitute served call 0, the primary came back for

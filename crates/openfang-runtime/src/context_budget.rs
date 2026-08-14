@@ -84,14 +84,70 @@ pub fn truncate_tool_result_dynamic(content: &str, budget: &ContextBudget) -> St
         break_point -= 1;
     }
 
+    let kept = &content[..break_point];
+
     format!(
-        "{}\n\n[TRUNCATED: result was {} chars, showing first {} (budget: {}% of {}K context window)]",
-        &content[..break_point],
+        "{}\n\n[TRUNCATED: result was {} bytes, showing first {} (budget: {}% of {}K context window)]",
+        rewrite_paging_header(kept),
         content.len(),
         break_point,
         30,
         budget.context_window_tokens / 1000
     )
+}
+
+/// Correct a `file_read` paging header that this truncation just invalidated.
+///
+/// `file_read` writes its header before the result reaches this layer, so a `limit` larger
+/// than the per-result cap produces a header describing bytes the model never receives —
+/// and, worse, an `offset=` for the next call that skips everything between. Measured: a
+/// header promising bytes 0-200000 on a result cut to 119 783 would silently lose 80 217
+/// bytes if the model followed it.
+///
+/// The model cannot derive the truth from the two markers: the `[TRUNCATED]` count includes
+/// the header itself, so "first N" is not an offset into the file. So the header is rewritten
+/// here, where the delivered length is finally known.
+fn rewrite_paging_header(kept: &str) -> String {
+    const MARK: &str = "[file_read: returned bytes ";
+    if !kept.starts_with(MARK) {
+        return kept.to_string();
+    }
+    let Some(nl) = kept.find('\n') else {
+        return kept.to_string();
+    };
+    let header = &kept[..nl];
+    let body_len = kept.len() - (nl + 1);
+
+    // "[file_read: returned bytes {start}-{end} of {total} total in this file ..."
+    let after = &header[MARK.len()..];
+    let Some((start_s, rest)) = after.split_once('-') else {
+        return kept.to_string();
+    };
+    let Some((_end_s, tail)) = rest.split_once(" of ") else {
+        return kept.to_string();
+    };
+    let Some((total_s, _)) = tail.split_once(' ') else {
+        return kept.to_string();
+    };
+    let (Ok(start), Ok(total)) = (start_s.parse::<usize>(), total_s.parse::<usize>()) else {
+        return kept.to_string();
+    };
+
+    let delivered_end = (start + body_len).min(total);
+    let remaining = total.saturating_sub(delivered_end);
+    let mut fixed = format!(
+        "[file_read: returned bytes {start}-{delivered_end} of {total} total in this file \
+         ({} bytes); the request was cut short by the context budget",
+        delivered_end - start
+    );
+    if remaining > 0 {
+        fixed.push_str(&format!(
+            "; {remaining} bytes remain. Call file_read again with offset={delivered_end} to continue reading.]"
+        ));
+    } else {
+        fixed.push(']');
+    }
+    format!("{fixed}\n{}", &kept[nl + 1..])
 }
 
 /// Layer 2: Context guard — scan all tool_result blocks in the message history.

@@ -11,6 +11,7 @@ pub mod google_chat;
 pub mod irc;
 pub mod matrix;
 pub mod mattermost;
+pub mod redact;
 pub mod rocketchat;
 pub mod router;
 pub mod signal;

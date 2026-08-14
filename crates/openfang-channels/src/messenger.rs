@@ -5,6 +5,7 @@
 //! supports both GET (verification challenge) and POST (message events).
 //! Authentication uses the page access token as a query parameter on the Send API.
 
+use crate::redact::redact_reqwest_error;
 use crate::types::{
     split_message, ChannelAdapter, ChannelContent, ChannelMessage, ChannelType, ChannelUser,
 };
@@ -73,7 +74,14 @@ impl MessengerAdapter {
             self.page_token.as_str()
         );
 
-        let resp = self.client.get(&url).send().await?;
+        // FANG-44: `url` carries the page access token in the query string —
+        // redact before a connection-level reqwest::Error can leak it.
+        let resp = self
+            .client
+            .get(&url)
+            .send()
+            .await
+            .map_err(redact_reqwest_error)?;
 
         if !resp.status().is_success() {
             let status = resp.status();
@@ -111,7 +119,15 @@ impl MessengerAdapter {
                 "messaging_type": "RESPONSE",
             });
 
-            let resp = self.client.post(&url).json(&body).send().await?;
+            // FANG-44: this is the real, always-reachable outbound send path
+            // — `url` carries the page access token in the query string.
+            let resp = self
+                .client
+                .post(&url)
+                .json(&body)
+                .send()
+                .await
+                .map_err(redact_reqwest_error)?;
 
             if !resp.status().is_success() {
                 let status = resp.status();
@@ -393,7 +409,15 @@ impl ChannelAdapter for MessengerAdapter {
                     "messaging_type": "RESPONSE",
                 });
 
-                let resp = self.client.post(&api_url).json(&body).send().await?;
+                // FANG-44: `api_url` carries the page access token in the
+                // query string, same as api_send_message above.
+                let resp = self
+                    .client
+                    .post(&api_url)
+                    .json(&body)
+                    .send()
+                    .await
+                    .map_err(redact_reqwest_error)?;
                 if !resp.status().is_success() {
                     let status = resp.status();
                     let resp_body = resp.text().await.unwrap_or_default();

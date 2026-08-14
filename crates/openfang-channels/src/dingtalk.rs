@@ -4,6 +4,7 @@
 //! are received via an HTTP webhook callback server, and outbound messages are
 //! posted to the robot send endpoint with HMAC-SHA256 signature verification.
 
+use crate::redact::redact_reqwest_error;
 use crate::types::{
     split_message, ChannelAdapter, ChannelContent, ChannelMessage, ChannelType, ChannelUser,
 };
@@ -289,7 +290,15 @@ impl ChannelAdapter for DingTalkAdapter {
                 }
             });
 
-            let resp = self.client.post(&url).json(&body).send().await?;
+            // FANG-44: `url` carries access_token+sign in the query string —
+            // redact before a connection-level reqwest::Error can leak it.
+            let resp = self
+                .client
+                .post(&url)
+                .json(&body)
+                .send()
+                .await
+                .map_err(redact_reqwest_error)?;
 
             if !resp.status().is_success() {
                 let status = resp.status();

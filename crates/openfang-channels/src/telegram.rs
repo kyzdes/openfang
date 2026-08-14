@@ -31,20 +31,32 @@ const STARTUP_API_TIMEOUT: Duration = Duration::from_secs(10);
 /// Default Telegram Bot API base URL.
 const DEFAULT_API_URL: &str = "https://api.telegram.org";
 
-/// Strip the request URL from a `reqwest::Error` before it is logged.
+// FANG-39/FANG-44: every Telegram Bot API call embeds the bot token directly
+// in the URL path (`{api_base_url}/bot{token}/...}`), which is how the Bot
+// API authenticates requests — there is no header alternative. A bare `{e}`
+// on a `reqwest::Error` from one of these calls prints the token in
+// cleartext, so every such error is routed through the crate-shared
+// `redact_reqwest_error` (see `crate::redact`) before it is displayed or
+// propagated.
+use crate::redact::redact_reqwest_error;
+
+/// FANG-43: strip the bot token out of a resolved Telegram file-download URL
+/// before it is placed into agent-visible `ChannelContent`.
 ///
-/// Every Telegram Bot API call embeds the bot token directly in the URL path
-/// (`{api_base_url}/bot{token}/...`), which is how the Bot API authenticates
-/// requests — there is no header alternative. `reqwest` attaches the request
-/// URL to connection-level errors (failed connect, timeout, TLS, redirect,
-/// malformed-URI) so they're reproducible from logs, but that means a bare
-/// `{e}` on such an error prints the token in cleartext. Call this on every
-/// `reqwest::Error` coming out of `.send()` before it is displayed or
-/// propagated, so the token never reaches a log line. This does not cover
-/// decode errors from `.json()`/`.text()` — `reqwest` never attaches a URL
-/// to those in the first place.
-fn redact_reqwest_error(e: reqwest::Error) -> reqwest::Error {
-    e.without_url()
+/// `telegram_get_file_url` returns a URL with the bot token embedded
+/// (`.../file/bot{token}/...`) — that's required to actually fetch the file
+/// bytes, so `send_content`'s outbound path and `download_image_to_blocks`
+/// (which fetches photos server-side and only ever hands the LLM base64
+/// bytes) keep using the real URL. But `ChannelContent::File`/`Voice` have no
+/// server-side download step: `bridge.rs` formats their `url` directly into
+/// the prompt text the LLM sees. Live-reproduced (FANG-43): with the real
+/// token left in, it landed twice — once in that prompt text, and a second
+/// time in the LLM's own follow-up tool_use call trying to `web_fetch` the
+/// URL. Blanking the token (not the whole URL — the filename/shape still
+/// tells the agent a file arrived) keeps that message pipeline working while
+/// making the URL non-functional for the credential it would otherwise leak.
+fn redact_file_token(url: &str, token: &str) -> String {
+    url.replacen(token, "[REDACTED]", 1)
 }
 
 #[derive(Serialize)]
@@ -1037,8 +1049,12 @@ async fn parse_telegram_update(
             .unwrap_or("document")
             .to_string();
         match telegram_get_file_url(token, client, file_id, api_base_url).await {
+            // FANG-43: this url carries the live bot token — redact before
+            // it enters ChannelContent, which bridge.rs formats straight
+            // into the LLM-visible prompt text (no download step in between,
+            // unlike photos).
             Some(url) => ChannelContent::File {
-                url,
+                url: redact_file_token(&url, token),
                 filename,
                 mime: None,
                 size: None,
@@ -1049,8 +1065,9 @@ async fn parse_telegram_update(
         let file_id = message["voice"]["file_id"].as_str().unwrap_or("");
         let duration = message["voice"]["duration"].as_u64().unwrap_or(0) as u32;
         match telegram_get_file_url(token, client, file_id, api_base_url).await {
+            // FANG-43: same reasoning as the document case above.
             Some(url) => ChannelContent::Voice {
-                url,
+                url: redact_file_token(&url, token),
                 duration_seconds: duration,
             },
             None => ChannelContent::Text(format!("[Voice message, {duration}s]")),
@@ -1283,40 +1300,35 @@ mod tests {
         reqwest::Client::new()
     }
 
-    /// FANG-39: `redact_reqwest_error` must strip the bot token out of a
-    /// `reqwest::Error`'s `Display` output. Connection-level errors carry
-    /// the full request URL (which embeds the token as `/bot<token>/...`);
-    /// without redaction, logging the error verbatim leaks the token.
-    ///
-    /// Uses an invalid hostname to force a `Kind::Builder` error with a URL
-    /// attached — deterministic and requires no real network I/O (mirrors
-    /// reqwest's own `execute_request_rejects_invalid_hostname` test).
-    #[tokio::test]
-    async fn test_redact_reqwest_error_strips_token_from_url() {
-        let token = "123456789:AAFakeTokenForTestingOnly-doNotUse";
-        let bad_url = format!("https://{{{{hostname}}}}/bot{token}/getUpdates");
+    /// FANG-43: `redact_file_token` must blank the bot token out of a
+    /// resolved file-download URL while leaving the rest of the URL (host,
+    /// path shape) intact — the point is to stop publishing the secret, not
+    /// to make the "a file arrived" notice disappear.
+    #[test]
+    fn test_redact_file_token_strips_token_keeps_shape() {
+        let token = "424242:FANG43-fake-token-do-not-reuse-ABCDEF";
+        let url = format!("https://api.telegram.org/file/bot{token}/documents/probe.pdf");
 
-        let err = test_client()
-            .get(&bad_url)
-            .send()
-            .await
-            .expect_err("malformed hostname must fail before any network I/O");
+        let redacted = redact_file_token(&url, token);
 
-        // Sanity check: confirm the token really is present pre-redaction,
-        // otherwise this test would pass for the wrong reason.
         assert!(
-            err.url().is_some(),
-            "test assumption broken: reqwest stopped attaching url() to builder errors"
+            !redacted.contains(token),
+            "redacted url still leaks the bot token: {redacted}"
         );
-        assert!(format!("{err}").contains(token));
+        assert_eq!(
+            redacted,
+            "https://api.telegram.org/file/bot[REDACTED]/documents/probe.pdf"
+        );
+    }
 
-        let redacted = redact_reqwest_error(err);
-        let rendered = format!("{redacted}");
-        assert!(
-            !rendered.contains(token),
-            "redacted error still leaks the bot token: {rendered}"
-        );
-        assert!(redacted.url().is_none());
+    /// A token that never appears in the URL (e.g. `telegram_get_file_url`
+    /// returned `None` and the caller never calls this) must leave the URL
+    /// byte-for-byte unchanged rather than corrupt it.
+    #[test]
+    fn test_redact_file_token_no_match_is_noop() {
+        let url = "https://api.telegram.org/file/bot999:other-token/documents/probe.pdf";
+        let redacted = redact_file_token(url, "not-the-token-in-this-url");
+        assert_eq!(redacted, url);
     }
 
     #[tokio::test]

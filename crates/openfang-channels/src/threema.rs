@@ -5,6 +5,7 @@
 //! the Threema Gateway API secret. Inbound messages arrive as POST requests
 //! to the configured webhook port.
 
+use crate::redact::redact_reqwest_error;
 use crate::types::{
     split_message, ChannelAdapter, ChannelContent, ChannelMessage, ChannelType, ChannelUser,
 };
@@ -69,7 +70,14 @@ impl ThreemaAdapter {
             self.threema_id,
             self.secret.as_str()
         );
-        let resp = self.client.get(&url).send().await?;
+        // FANG-44: `url` carries the API secret in the query string —
+        // redact before a connection-level reqwest::Error can leak it.
+        let resp = self
+            .client
+            .get(&url)
+            .send()
+            .await
+            .map_err(redact_reqwest_error)?;
 
         if !resp.status().is_success() {
             return Err("Threema Gateway authentication failed".into());
@@ -85,6 +93,10 @@ impl ThreemaAdapter {
         to: &str,
         text: &str,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        // FANG-44 audit note: unlike `validate()` above, `url` here carries
+        // no query string — the secret travels in the form body instead, so
+        // it never reaches a reqwest::Error's Display. No redaction needed
+        // on the `.send()` below.
         let url = format!("{}/send_simple", THREEMA_API_URL);
         let chunks = split_message(text, MAX_MESSAGE_LEN);
 

@@ -5,6 +5,7 @@
 //! is performed via a Bot token parameter. Flock delivers events as JSON POST
 //! requests to the configured webhook endpoint.
 
+use crate::redact::redact_reqwest_error;
 use crate::types::{
     split_message, ChannelAdapter, ChannelContent, ChannelMessage, ChannelType, ChannelUser,
 };
@@ -65,7 +66,16 @@ impl FlockAdapter {
             FLOCK_API_BASE,
             self.bot_token.as_str()
         );
-        let resp = self.client.get(&url).send().await?;
+        // FANG-44: `url` carries the bot token in the query string here
+        // (unlike api_send_message/api_send_rich_message below, which put it
+        // in the JSON body) — redact before a connection-level
+        // reqwest::Error can leak it.
+        let resp = self
+            .client
+            .get(&url)
+            .send()
+            .await
+            .map_err(redact_reqwest_error)?;
 
         if !resp.status().is_success() {
             return Err("Flock authentication failed".into());
@@ -86,6 +96,10 @@ impl FlockAdapter {
         to: &str,
         text: &str,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        // FANG-44 audit note: unlike `validate()` above, `url` here carries
+        // no query string — the bot token travels in the JSON body instead,
+        // so it never reaches a reqwest::Error's Display. No redaction
+        // needed on the `.send()` below.
         let url = format!("{}/chat.sendMessage", FLOCK_API_BASE);
         let chunks = split_message(text, MAX_MESSAGE_LEN);
 

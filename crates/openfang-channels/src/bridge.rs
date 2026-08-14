@@ -4,6 +4,7 @@
 //! `BridgeManager` which owns running adapters and dispatches messages.
 
 use crate::formatter;
+use crate::redact::redact_reqwest_error;
 use crate::router::{AgentRouter, BindingContext};
 use crate::types::{
     default_phase_emoji, AgentPhase, ChannelAdapter, ChannelContent, ChannelMessage, ChannelUser,
@@ -1024,13 +1025,19 @@ async fn dispatch_message(
         ChannelContent::Text(t) => t.clone(),
         ChannelContent::Command { .. } => unreachable!(), // handled above
         ChannelContent::Image {
-            ref url,
+            url: ref _url,
             ref caption,
         } => {
-            // Fallback when image download failed
+            // Fallback when image download failed. FANG-43: deliberately
+            // drop the url here rather than format it in — some adapters
+            // (Telegram) embed a live bot token in this URL, and unlike the
+            // success path (which only ever hands the LLM base64 bytes, see
+            // `download_image_to_blocks`), this text goes straight into the
+            // prompt. The agent doesn't need the URL to know a photo arrived
+            // and failed to download.
             match caption {
-                Some(c) => format!("[User sent a photo: {url}]\nCaption: {c}"),
-                None => format!("[User sent a photo: {url}]"),
+                Some(c) => format!("[User sent a photo, but it could not be downloaded]\nCaption: {c}"),
+                None => "[User sent a photo, but it could not be downloaded]".to_string(),
             }
         }
         ChannelContent::File {
@@ -1056,9 +1063,13 @@ async fn dispatch_message(
             .iter()
             .map(|p| match p {
                 ChannelContent::Text(t) => t.clone(),
-                ChannelContent::Image { url, caption } => match caption {
-                    Some(c) => format!("[User sent a photo: {url}]\nCaption: {c}"),
-                    None => format!("[User sent a photo: {url}]"),
+                // FANG-43: see the non-Multipart Image arm above for why the
+                // url is dropped here rather than formatted in.
+                ChannelContent::Image { url: _, caption } => match caption {
+                    Some(c) => {
+                        format!("[User sent a photo, but it could not be downloaded]\nCaption: {c}")
+                    }
+                    None => "[User sent a photo, but it could not be downloaded]".to_string(),
                 },
                 ChannelContent::File { url, filename, .. } => {
                     format!("[User sent a file ({filename}): {url}]")
@@ -1617,6 +1628,12 @@ async fn download_image_to_blocks(url: &str, caption: Option<&str>) -> Vec<Conte
             let resp = match client.get(url).send().await {
                 Ok(r) => r,
                 Err(e) => {
+                    // FANG-43/FANG-44: some adapters (Telegram) embed a live
+                    // bot token in `url`, and reqwest attaches the request
+                    // URL to connection-level errors — redact before this
+                    // ever reaches a log line or (in the Multipart path,
+                    // where this Text block is used verbatim) the LLM.
+                    let e = redact_reqwest_error(e);
                     warn!("Failed to download image from channel: {e}");
                     return vec![ContentBlock::Text {
                         text: format!("[Image download failed: {e}]"),
@@ -1639,6 +1656,8 @@ async fn download_image_to_blocks(url: &str, caption: Option<&str>) -> Vec<Conte
             let bytes = match resp.bytes().await {
                 Ok(b) => b,
                 Err(e) => {
+                    // Same reasoning as the connect/send error above.
+                    let e = redact_reqwest_error(e);
                     warn!("Failed to read image bytes: {e}");
                     return vec![ContentBlock::Text {
                         text: format!("[Image read failed: {e}]"),

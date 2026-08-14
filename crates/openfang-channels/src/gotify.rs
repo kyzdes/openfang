@@ -4,6 +4,7 @@
 //! and sends messages via the REST API. Uses separate app and client tokens
 //! for publishing and subscribing respectively.
 
+use crate::redact::redact_reqwest_error;
 use crate::types::{
     split_message, ChannelAdapter, ChannelContent, ChannelMessage, ChannelType, ChannelUser,
 };
@@ -66,7 +67,17 @@ impl GotifyAdapter {
             self.server_url,
             self.client_token.as_str()
         );
-        let resp = self.client.get(&url).send().await?;
+        // FANG-44: `url` carries the client token in the query string —
+        // redact before a connection-level reqwest::Error can leak it. (A
+        // prior commit's message claimed Gotify didn't leak; it does, both
+        // here and in api_send_message below — this was verified against
+        // the actual send path, not assumed.)
+        let resp = self
+            .client
+            .get(&url)
+            .send()
+            .await
+            .map_err(redact_reqwest_error)?;
 
         if !resp.status().is_success() {
             return Err(format!("Gotify auth failed (HTTP {})", resp.status()).into());
@@ -78,6 +89,16 @@ impl GotifyAdapter {
     }
 
     /// Build the WebSocket URL for the stream endpoint.
+    ///
+    /// FANG-44 audit note: this URL also carries the client token in the
+    /// query string, but the connection error path is `tokio_tungstenite`
+    /// (not `reqwest`), which `redact_reqwest_error` doesn't cover. Checked
+    /// against the actual tungstenite 0.24 source (`connect_async` ->
+    /// `TcpStream::connect` on a bare `host:port`, unrelated errors mapped
+    /// through `Error::Io`/`Error::Http`/`Error::Protocol`, none of which
+    /// embed the request URI) — the failure path used here does not
+    /// interpolate this URL into its `Display`, so there's nothing to
+    /// redact today. Left unfixed deliberately, not missed.
     fn build_ws_url(&self) -> String {
         let base = self
             .server_url
@@ -113,7 +134,15 @@ impl GotifyAdapter {
                 "priority": priority,
             });
 
-            let resp = self.client.post(&url).json(&body).send().await?;
+            // FANG-44: `url` carries the app token in the query string —
+            // this is the real, always-reachable outbound send path.
+            let resp = self
+                .client
+                .post(&url)
+                .json(&body)
+                .send()
+                .await
+                .map_err(redact_reqwest_error)?;
 
             if !resp.status().is_success() {
                 let status = resp.status();

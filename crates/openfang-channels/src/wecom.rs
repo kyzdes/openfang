@@ -5,6 +5,7 @@
 //! obtained from `https://qyapi.weixin.qq.com/cgi-bin/gettoken`.
 //! The token is cached and refreshed automatically.
 
+use crate::redact::redact_reqwest_error;
 use crate::types::{
     split_message, ChannelAdapter, ChannelContent, ChannelMessage, ChannelType, ChannelUser,
 };
@@ -262,7 +263,15 @@ impl WeComAdapter {
             self.secret.as_str()
         );
 
-        let response = self.client.get(&url).send().await?;
+        // FANG-44: `url` carries the raw corpsecret in the query string —
+        // this fires on every cache miss/expiry, not just first use.
+        // Redact before a connection-level reqwest::Error can leak it.
+        let response = self
+            .client
+            .get(&url)
+            .send()
+            .await
+            .map_err(redact_reqwest_error)?;
         let json: serde_json::Value = response.json().await?;
 
         if let Some(errcode) = json.get("errcode").and_then(|v| v.as_i64()) {
@@ -309,7 +318,15 @@ impl WeComAdapter {
             }
         });
 
-        let response = self.client.post(&url).json(&payload).send().await?;
+        // FANG-44: `url` carries the derived access_token in the query
+        // string — this is the real, always-reachable outbound send path.
+        let response = self
+            .client
+            .post(&url)
+            .json(&payload)
+            .send()
+            .await
+            .map_err(redact_reqwest_error)?;
 
         let json: serde_json::Value = response.json().await?;
 
